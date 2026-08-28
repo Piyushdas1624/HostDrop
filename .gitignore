@@ -25,3 +25,9 @@ Desktop.ini
 TurboShare/
 TurboShare_Received/
 EthernetTransfers/
+
+# Agent metadata and audit artifacts
+.agents/
+*.png
+*.class
+*.jar

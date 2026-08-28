@@ -5,7 +5,7 @@ color 0b
 
 echo.
 echo  ====================================================================
-echo     ⚡  TurboShare  —  2-Way Cross-Device File Transfer Hub
+echo     TurboShare  —  2-Way Cross-Device File Transfer Hub
 echo  ====================================================================
 echo.
 
@@ -28,21 +28,27 @@ echo.
 :: Install optional dependencies quietly
 python -m pip install qrcode[pil] psutil --quiet --exists-action i >nul 2>&1
 
-:: Ask for receive folder
-echo  Where do you want to RECEIVE files?
-echo  (Press ENTER to use D:\TurboShare, or type a path)
+:: Ask for receive folder (Inbox)
+echo  Where do you want to save INCOMING files on this PC (Inbox)?
+echo  (Press ENTER to use D:\TurboShare, or type a custom path)
 echo.
-set /p RECV_DIR="  > Receive folder path: "
+set /p RECV_DIR="  > Inbox folder path: "
 
 if "%RECV_DIR%"=="" (
     set RECV_DIR=D:\TurboShare
 )
 
 echo.
-echo  Starting TurboShare…
-echo  Open the URL shown below in any browser on your network.
+echo  ====================================================================
+echo     Starting TurboShare Hub on http://127.0.0.1:8080 ...
+echo     Opening dashboard in your default browser...
+echo  ====================================================================
 echo.
 
+:: Automatically open default browser in background
+start "" http://127.0.0.1:8080
+
+:: Start TurboShare server in foreground to maintain active terminal session
 python "%~dp0turboshare.py" "%RECV_DIR%"
 
 echo.
