@@ -132,18 +132,40 @@ def get_local_ip_set():
 def disk_info(path):
     """Calculate free, total, used percentage and formatted metrics for a path."""
     if not path:
-        return {"free_gb": "?", "total_gb": "?", "used_pct": 0, "free_bytes": 0, "total_bytes": 0}
+        return {
+            "free_gb": "?",
+            "total_gb": "?",
+            "used_gb": "?",
+            "used_pct": 0,
+            "used_percent": 0.0,
+            "free_bytes": 0,
+            "total_bytes": 0,
+            "used_bytes": 0
+        }
     try:
         total, used, free = shutil.disk_usage(path)
+        used_pct_val = round((used / total) * 100, 1) if total > 0 else 0.0
         return {
             "free_gb": f"{free / (1024**3):.1f}",
             "total_gb": f"{total / (1024**3):.1f}",
+            "used_gb": f"{used / (1024**3):.1f}",
             "used_pct": int(used * 100 // total) if total > 0 else 0,
+            "used_percent": used_pct_val,
             "free_bytes": free,
-            "total_bytes": total
+            "total_bytes": total,
+            "used_bytes": used
         }
     except Exception:
-        return {"free_gb": "?", "total_gb": "?", "used_pct": 0, "free_bytes": 0, "total_bytes": 0}
+        return {
+            "free_gb": "?",
+            "total_gb": "?",
+            "used_gb": "?",
+            "used_pct": 0,
+            "used_percent": 0.0,
+            "free_bytes": 0,
+            "total_bytes": 0,
+            "used_bytes": 0
+        }
 
 
 def safe_path(base_dir, rel):
@@ -181,13 +203,17 @@ def get_host_drives():
                     drive_path = f"{letter}:\\"
                     try:
                         u = shutil.disk_usage(drive_path)
+                        used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
                         drives.append({
                             "path": drive_path,
                             "name": f"Local Disk ({letter}:)",
                             "letter": letter,
+                            "label": f"OS ({letter}:)" if letter.upper() == "C" else f"Data ({letter}:)" if letter.upper() == "D" else f"Local Disk ({letter}:)",
                             "free_gb": f"{u.free / (1024**3):.1f}",
                             "total_gb": f"{u.total / (1024**3):.1f}",
+                            "used_gb": f"{u.used / (1024**3):.1f}",
                             "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                            "used_percent": used_pct_val,
                             "is_system": letter.upper() == "C"
                         })
                     except Exception:
@@ -195,9 +221,12 @@ def get_host_drives():
                             "path": drive_path,
                             "name": f"Drive ({letter}:)",
                             "letter": letter,
+                            "label": f"Drive ({letter}:)",
                             "free_gb": "?",
                             "total_gb": "?",
+                            "used_gb": "?",
                             "used_pct": 0,
+                            "used_percent": 0.0,
                             "is_system": letter.upper() == "C"
                         })
                 bitmask >>= 1
@@ -207,13 +236,17 @@ def get_host_drives():
                 if os.path.exists(drive_path):
                     try:
                         u = shutil.disk_usage(drive_path)
+                        used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
                         drives.append({
                             "path": drive_path,
                             "name": f"Drive ({letter}:)",
                             "letter": letter,
+                            "label": f"Drive ({letter}:)",
                             "free_gb": f"{u.free / (1024**3):.1f}",
                             "total_gb": f"{u.total / (1024**3):.1f}",
+                            "used_gb": f"{u.used / (1024**3):.1f}",
                             "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                            "used_percent": used_pct_val,
                             "is_system": letter.upper() == "C"
                         })
                     except Exception:
@@ -233,13 +266,17 @@ def get_host_drives():
             if os.path.exists(p):
                 try:
                     u = shutil.disk_usage(p)
+                    used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
                     drives.append({
                         "path": p,
                         "name": os.path.basename(p) or "Root (/)",
                         "letter": "/",
+                        "label": os.path.basename(p) or "Root (/)",
                         "free_gb": f"{u.free / (1024**3):.1f}",
                         "total_gb": f"{u.total / (1024**3):.1f}",
+                        "used_gb": f"{u.used / (1024**3):.1f}",
                         "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                        "used_percent": used_pct_val,
                         "is_system": p == "/"
                     })
                 except Exception:
@@ -326,6 +363,11 @@ def browse_host_directory(path=""):
         "current_path": target,
         "parent_path": parent,
         "disk": d_info,
+        "free_gb": d_info.get("free_gb"),
+        "total_gb": d_info.get("total_gb"),
+        "used_gb": d_info.get("used_gb"),
+        "used_pct": d_info.get("used_pct"),
+        "used_percent": d_info.get("used_percent"),
         "drives": drives,
         "subdirs": subdirs
     }
@@ -1486,14 +1528,14 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   MODAL DIALOGS
+   MODAL DIALOGS & HOST FOLDER NAVIGATOR OVERHAUL
    ═══════════════════════════════════════════════════════════════════════════════ */
 .modal-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   z-index: 500;
   display: flex;
   align-items: center;
@@ -1525,6 +1567,14 @@ body {
   transform: scale(1);
 }
 
+#hostBrowserModal .modal-content {
+  max-width: 680px;
+  width: 100%;
+  max-height: 85vh;
+  height: 640px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
 .modal-header {
   padding: 14px 20px;
   border-bottom: 1px solid var(--border-standard);
@@ -1532,6 +1582,7 @@ body {
   align-items: center;
   justify-content: space-between;
   background: var(--surface-1);
+  flex-shrink: 0;
 }
 
 .modal-title {
@@ -1560,64 +1611,360 @@ body {
   justify-content: flex-end;
   gap: 8px;
   background: var(--surface-2);
+  flex-shrink: 0;
 }
 
-.drives-chip-bar {
+/* Mobile Bottom Sheet Grab Handle */
+.bottom-sheet-handle-bar {
+  display: none;
+  width: 100%;
+  padding: 8px 0 2px 0;
+  text-align: center;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.bottom-sheet-handle {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.22);
+  margin: 0 auto;
+}
+
+/* Drive Cards Ribbon */
+.drive-cards-ribbon {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding-bottom: 4px;
+  padding: 2px 0 6px 0;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.drive-cards-ribbon::-webkit-scrollbar { display: none; }
+
+.drive-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  min-width: 150px;
+  flex: 1 0 150px;
+  max-width: 220px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  scroll-snap-align: start;
 }
 
-.drive-chip {
+.drive-card:hover {
+  background: var(--surface-3);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.drive-card:active {
+  transform: scale(0.98);
+}
+
+.drive-card.active {
+  background: var(--surface-3);
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 1px var(--brand-blue), 0 2px 12px var(--brand-blue-glow);
+}
+
+.drive-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.drive-card-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  min-width: 0;
+}
+.drive-card-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drive-card.active .drive-card-title { color: var(--brand-blue); }
+
+.drive-card-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.drive-card.active .drive-card-badge {
+  background: rgba(79, 127, 255, 0.15);
+  color: var(--brand-blue);
+  border-color: rgba(79, 127, 255, 0.35);
+}
+
+.drive-card-meter {
+  width: 100%;
+  height: 4px;
+  background: var(--surface-4);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.drive-card-meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--brand-blue);
+  transition: width 0.3s ease;
+}
+.drive-card-meter-fill.warning { background: var(--status-warning); }
+.drive-card-meter-fill.danger { background: var(--status-error); }
+
+.drive-card-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Breadcrumbs Bar */
+.modal-nav-bar {
   display: flex;
   align-items: center;
   gap: 6px;
   background: var(--surface-2);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-md);
-  padding: 6px 10px;
-  font-size: 11px;
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  min-height: 36px;
+  padding: 4px 6px;
+  min-height: 42px;
 }
-.drive-chip:hover {
+
+.modal-btn-up, .breadcrumb-edit-btn {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
   background: var(--surface-3);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.12s ease;
+}
+.modal-btn-up:hover:not(:disabled), .breadcrumb-edit-btn:hover {
+  background: var(--surface-4);
+  color: var(--text-primary);
   border-color: var(--border-hover);
 }
-.drive-chip.active {
-  background: var(--surface-4);
-  border-color: var(--brand-blue);
-  color: var(--brand-blue);
+.modal-btn-up:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
-.drive-chip svg { width: 14px; height: 14px; }
 
-.folder-tree-list {
+.breadcrumb-trail-container {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  flex: 1;
+  min-width: 0;
+  padding: 0 4px;
+}
+.breadcrumb-trail-container::-webkit-scrollbar { display: none; }
+
+.crumb-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  min-height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: none;
+}
+.crumb-btn:hover { background: var(--surface-3); color: var(--text-primary); }
+.crumb-btn.active { color: var(--text-primary); font-weight: 600; cursor: default; }
+
+.crumb-divider {
+  color: var(--text-disabled);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  user-select: none;
+}
+
+/* Quick Filter Toolbar */
+.modal-filter-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.modal-filter-box {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.modal-filter-box .filter-icon {
+  position: absolute;
+  left: 10px;
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+
+.modal-filter-input {
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 30px 6px 32px;
+  background: var(--surface-2);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-md);
-  background: var(--surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  outline: none;
+  transition: all 0.15s ease;
+}
+.modal-filter-input:focus {
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 2px var(--brand-blue-glow);
+}
+
+.modal-filter-clear-btn {
+  position: absolute;
+  right: 4px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.modal-filter-clear-btn:hover { color: var(--text-primary); background: var(--surface-3); }
+.modal-filter-clear-btn svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+.modal-filter-badge {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-3);
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+}
+
+/* Inline New Folder Creator */
+.inline-folder-creator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-3);
+  border: 1px solid var(--brand-blue);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+}
+
+.inline-folder-input {
+  flex: 1;
+  background: var(--surface-1);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  outline: none;
+  font-family: var(--font-sans);
+}
+.inline-folder-input:focus { border-color: var(--brand-blue); }
+
+/* Folder Tree Container & Rows */
+.modal-tree-container {
+  flex: 1;
+  min-height: 180px;
   max-height: 280px;
   overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
+  -webkit-overflow-scrolling: touch;
+  outline: none;
 }
 
 .folder-tree-item {
-  padding: 8px 12px;
+  padding: 9px 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border-subtle);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-primary);
-  min-height: 38px;
+  min-height: 40px;
+  transition: background 0.1s ease;
+  user-select: none;
 }
 .folder-tree-item:last-child { border-bottom: none; }
-.folder-tree-item:hover { background: var(--surface-3); }
-.folder-tree-item.parent-dir { color: var(--text-tertiary); font-style: italic; }
+.folder-tree-item:hover, .folder-tree-item.focused { background: var(--surface-3); }
+.folder-tree-item:active { background: var(--surface-4); }
+
+.folder-tree-item-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    FAQ ACCORDION & SEARCH STYLES (R4)
@@ -1901,6 +2248,75 @@ body {
   .upload-actions-mobile { display: flex; gap: 8px; }
   .modal-overlay { align-items: flex-end; padding: 0; }
   .modal-content { max-width: 100%; border-radius: var(--radius-xl) var(--radius-xl) 0 0; max-height: 90dvh; }
+
+  #hostBrowserModal.modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+  #hostBrowserModal .modal-content {
+    max-width: 100%;
+    width: 100%;
+    height: 88dvh;
+    max-height: 88dvh;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: none;
+    transform: translateY(100%);
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+  #hostBrowserModal.open .modal-content {
+    transform: translateY(0);
+  }
+  .bottom-sheet-handle-bar {
+    display: block;
+  }
+  #hostBrowserModal .modal-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  #hostBrowserModal .drive-card {
+    min-width: 140px;
+    min-height: 52px;
+    padding: 8px 12px;
+  }
+  #hostBrowserModal .modal-nav-bar {
+    min-height: 46px;
+  }
+  #hostBrowserModal .modal-btn-up, #hostBrowserModal .breadcrumb-edit-btn {
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+  }
+  #hostBrowserModal .crumb-btn {
+    min-height: 38px;
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  #hostBrowserModal .modal-filter-input {
+    min-height: 44px;
+    font-size: 13px;
+  }
+  #hostBrowserModal .folder-tree-item {
+    min-height: 48px;
+    padding: 12px 14px;
+    font-size: 13px;
+  }
+  #hostBrowserModal .modal-footer {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    padding: 12px 16px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+  #hostBrowserModal .modal-footer .btn-primary {
+    min-height: 48px;
+    font-size: 14px;
+    font-weight: 600;
+    flex: 1;
+  }
+  #hostBrowserModal .modal-footer .btn-ghost {
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 600px) {
@@ -2469,45 +2885,87 @@ body {
   </div>
 </div>
 
-<!-- In-Browser Host Folder Navigator Modal -->
-<div class="modal-overlay" id="hostBrowserModal">
+<!-- In-Browser Host Folder Navigator Modal (Linear / Apple Files Aesthetic) -->
+<div class="modal-overlay" id="hostBrowserModal" role="dialog" aria-modal="true" aria-labelledby="hostBrowserModalTitle">
   <div class="modal-content">
+    <div class="bottom-sheet-handle-bar">
+      <div class="bottom-sheet-handle"></div>
+    </div>
+    
     <div class="modal-header">
       <div class="modal-title">
         <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
         <span id="hostBrowserModalTitle">Select PC Folder</span>
       </div>
-      <button class="icon-btn-micro" onclick="closeModal('hostBrowserModal')">
+      <button class="icon-btn-micro" onclick="closeModal('hostBrowserModal')" aria-label="Close dialog">
         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
 
-    <div class="modal-body">
-      <!-- Drives Chips Bar -->
-      <div class="drives-chip-bar" id="modalDrivesBar">
+    <div class="modal-body" style="gap: 10px; padding: 14px 16px; overflow: hidden; display: flex; flex-direction: column; flex: 1;">
+      <!-- Drives Cards Ribbon -->
+      <div class="drive-cards-ribbon" id="modalDrivesBar" aria-label="Host Storage Drives">
         <!-- Rendered via JS -->
       </div>
 
-      <!-- Current Modal Breadcrumb & Manual Input -->
-      <div style="display: flex; gap: 8px;">
-        <input type="text" class="btn" style="flex: 1; text-align: left; font-family: var(--font-mono); font-size: 11px; cursor: text;" id="modalCurrentPathInput" placeholder="Enter path or browse below...">
-        <button class="btn btn-sm" onclick="browseModalPath(document.getElementById('modalCurrentPathInput').value)">Go</button>
-        <button class="btn btn-sm" onclick="promptCreateNewFolder()" title="Create new subfolder here">
-          <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-          New Folder
+      <!-- Segmented Breadcrumbs & Action Toolbar -->
+      <div class="modal-nav-bar" id="modalNavBar">
+        <button class="icon-btn modal-btn-up" id="modalBtnUpLevel" onclick="modalNavigateUp()" title="Up One Level (Parent Folder)" style="width: 32px; height: 32px;">
+          <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        
+        <div class="breadcrumb-trail-container" id="modalBreadcrumbTrail" aria-label="Breadcrumb Path Navigation">
+          <!-- Rendered via JS -->
+        </div>
+
+        <button class="icon-btn breadcrumb-edit-btn" id="modalBtnToggleManual" onclick="toggleManualPathInput()" title="Toggle manual path typing" style="width: 32px; height: 32px;">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
         </button>
       </div>
 
-      <!-- Subfolder Tree List -->
-      <div class="folder-tree-list" id="modalFolderTreeList">
+      <!-- Optional Manual Path Input Field (Hidden by default) -->
+      <div id="modalManualPathRow" style="display: none; gap: 8px; align-items: center;">
+        <input type="text" class="btn" style="flex: 1; text-align: left; font-family: var(--font-mono); font-size: 11px; cursor: text; min-height: 38px;" id="modalCurrentPathInput" placeholder="Enter absolute directory path...">
+        <button class="btn btn-sm" style="min-height: 38px; padding: 0 16px;" onclick="browseModalPath(document.getElementById('modalCurrentPathInput').value)">Go</button>
+      </div>
+
+      <!-- Quick-Filter Search Bar + Actions -->
+      <div class="modal-filter-toolbar">
+        <div class="modal-filter-box">
+          <svg class="icon filter-icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="modalFolderFilterInput" class="modal-filter-input" placeholder="Filter folders in this directory..." autocomplete="off" spellcheck="false">
+          <button id="modalFilterClearBtn" class="modal-filter-clear-btn" style="display: none;" onclick="clearModalFilter()" title="Clear filter" type="button">
+            <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <span id="modalFilterMatchCount" class="modal-filter-badge"></span>
+        <button class="btn btn-sm" id="modalBtnNewFolder" onclick="toggleInlineFolderCreator(true)" title="Create new subfolder in current directory">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+          <span class="btn-new-folder-label">New Folder</span>
+        </button>
+      </div>
+
+      <!-- Inline Sleek New Folder Creator -->
+      <div class="inline-folder-creator" id="modalInlineFolderCreator" style="display: none;">
+        <svg class="icon" style="color: #fbbf24;" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <input type="text" id="inlineNewFolderName" class="inline-folder-input" placeholder="New folder name..." autocomplete="off">
+        <button class="btn btn-primary btn-sm" onclick="submitInlineNewFolder()" style="min-height: 32px; padding: 0 12px;">Create</button>
+        <button class="btn btn-ghost btn-sm" onclick="toggleInlineFolderCreator(false)" style="min-height: 32px; padding: 0 10px;" title="Dismiss new folder creation">Dismiss</button>
+      </div>
+
+      <!-- Subfolder Tree List / Viewport -->
+      <div class="modal-tree-container" id="modalFolderTreeList" tabindex="0" role="listbox" aria-label="Subdirectories">
         <!-- Injected via JS -->
       </div>
     </div>
 
     <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" onclick="triggerNativePicker(browserModalTarget)">Windows Dialog</button>
+      <button class="btn btn-ghost btn-sm" onclick="triggerNativePicker(browserModalTarget)" title="Open standard Windows Explorer folder picker on Host">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>
+        <span>Windows Dialog</span>
+      </button>
       <button class="btn btn-ghost btn-sm" onclick="closeModal('hostBrowserModal')">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="confirmModalFolderSelection()">Select This Folder</button>
+      <button class="btn btn-primary btn-sm" id="modalConfirmBtn" onclick="confirmModalFolderSelection()">Select This Folder</button>
     </div>
   </div>
 </div>
@@ -3314,8 +3772,17 @@ window.addEventListener('drop', e => {
 });
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   IN-BROWSER HOST FOLDER NAVIGATOR MODAL
+   IN-BROWSER HOST FOLDER NAVIGATOR MODAL (Linear / Apple Files Architecture)
    ═══════════════════════════════════════════════════════════════════════════════ */
+let modalCurrentSubdirs = [];
+let modalParentPath = '';
+let modalIsRoot = false;
+let modalFocusedFolderIndex = -1;
+
+function escapeJs(str) {
+  return (str || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 function openHostBrowserModal(target) {
   browserModalTarget = target;
   document.getElementById('hostBrowserModalTitle').textContent = target === 'recv' 
@@ -3325,122 +3792,330 @@ function openHostBrowserModal(target) {
   let initialPath = target === 'recv' 
     ? (document.getElementById('recvPathText')?.textContent.trim() || '') 
     : (document.getElementById('sharePathText')?.textContent.trim() || '');
-  if (initialPath === 'No folder selected') initialPath = '';
+  if (initialPath === 'No folder selected' || initialPath === 'Not configured') initialPath = '';
+
+  toggleInlineFolderCreator(false);
+  const manualRow = document.getElementById('modalManualPathRow');
+  if (manualRow) manualRow.style.display = 'none';
+  const filterInput = document.getElementById('modalFolderFilterInput');
+  if (filterInput) filterInput.value = '';
 
   openModal('hostBrowserModal');
   browseModalPath(initialPath);
+  
+  setTimeout(() => {
+    if (filterInput) filterInput.focus();
+  }, 100);
 }
 
 async function browseModalPath(path) {
   const listEl = document.getElementById('modalFolderTreeList');
-  const drivesBar = document.getElementById('modalDrivesBar');
   const inputEl = document.getElementById('modalCurrentPathInput');
   
-  listEl.innerHTML = '<div style="padding: 16px; color: var(--text-tertiary); text-align: center;">Scanning directories...</div>';
+  listEl.innerHTML = '<div style="padding: 24px; color: var(--text-tertiary); text-align: center; display: flex; align-items: center; justify-content: center; gap: 8px;"><svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg><span>Scanning directories...</span></div>';
   
   try {
-    const res = await fetch('/api/browse_host?path=' + encodeURIComponent(path));
+    const res = await fetch('/api/browse_host?path=' + encodeURIComponent(path || ''));
     const data = await res.json();
     
     activeModalBrowsePath = data.current_path || '';
-    inputEl.value = activeModalBrowsePath;
+    modalParentPath = (data.parent_path !== undefined) ? data.parent_path : '';
+    modalIsRoot = !!data.is_root;
+    modalCurrentSubdirs = data.subdirs || [];
+    modalFocusedFolderIndex = -1;
 
-    // Render Drive Chips
-    drivesBar.innerHTML = '';
-    if (data.drives && data.drives.length > 0) {
-      data.drives.forEach(d => {
-        const chip = document.createElement('div');
-        chip.className = 'drive-chip' + (activeModalBrowsePath.startsWith(d.path) ? ' active' : '');
-        chip.innerHTML = `
-          <svg viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M4 14v-4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/></svg>
-          <span>${d.name}</span>
-          <span style="color: var(--text-tertiary);">(${d.free_gb} GB)</span>
-        `;
-        chip.onclick = () => browseModalPath(d.path);
-        drivesBar.appendChild(chip);
-      });
+    if (inputEl) inputEl.value = activeModalBrowsePath;
+
+    // Render Drive Cards with visual storage capacity meters
+    renderModalDrives(data.drives || []);
+
+    // Render Segmented Breadcrumb Trail
+    renderModalBreadcrumbs(activeModalBrowsePath, modalIsRoot);
+
+    // Update "Up One Level" button state
+    const upBtn = document.getElementById('modalBtnUpLevel');
+    if (upBtn) {
+      upBtn.disabled = (modalIsRoot && !activeModalBrowsePath);
     }
 
-    listEl.innerHTML = '';
+    // Filter and render subfolder list
+    filterModalFolders();
 
-    // Parent Directory Navigation Item
-    if (data.parent_path !== undefined && data.parent_path !== '') {
-      const parentRow = document.createElement('div');
-      parentRow.className = 'folder-tree-item parent-dir';
-      parentRow.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-          <strong>↑ Up One Level (Parent Folder)</strong>
-        </div>
-        <span style="font-size: 10px; color: var(--text-tertiary);">${escapeHtml(data.parent_path)}</span>
-      `;
-      parentRow.onclick = () => browseModalPath(data.parent_path);
-      listEl.appendChild(parentRow);
-    } else if (!data.is_root) {
-      const rootRow = document.createElement('div');
-      rootRow.className = 'folder-tree-item parent-dir';
-      rootRow.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
-          <strong>PC Storage Drives</strong>
-        </div>
-      `;
-      rootRow.onclick = () => browseModalPath('');
-      listEl.appendChild(rootRow);
-    }
-
-    // Subdirectories List
-    if (data.subdirs && data.subdirs.length > 0) {
-      data.subdirs.forEach(s => {
-        const itemRow = document.createElement('div');
-        itemRow.className = 'folder-tree-item';
-        itemRow.innerHTML = `
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <svg class="icon" style="color: #fbbf24;" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-            <span>${escapeHtml(s.name)}</span>
-          </div>
-          <svg class="icon" style="color: var(--text-tertiary);" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
-        `;
-        itemRow.onclick = () => browseModalPath(s.path);
-        listEl.appendChild(itemRow);
-      });
-    } else if (!data.is_root) {
-      const emptyItem = document.createElement('div');
-      emptyItem.style.padding = '14px';
-      emptyItem.style.color = 'var(--text-tertiary)';
-      emptyItem.style.textAlign = 'center';
-      emptyItem.textContent = 'No subfolders in this directory';
-      listEl.appendChild(emptyItem);
-    }
   } catch (e) {
-    listEl.innerHTML = `<div style="padding: 16px; color: var(--status-error); text-align: center;">Error browsing: ${e.message}</div>`;
+    listEl.innerHTML = `<div style="padding: 20px; color: var(--status-error); text-align: center;">Error browsing: ${escapeHtml(e.message)}</div>`;
   }
 }
 
-async function promptCreateNewFolder() {
-  const name = prompt('Enter new folder name:');
-  if (!name || !name.trim()) return;
-  
+function renderModalDrives(drives) {
+  const drivesBar = document.getElementById('modalDrivesBar');
+  if (!drivesBar) return;
+  drivesBar.innerHTML = '';
+
+  if (!drives || drives.length === 0) return;
+
+  drives.forEach(d => {
+    const usedPct = d.used_pct !== undefined ? d.used_pct : (d.used_percent ? Math.round(d.used_percent) : 0);
+    const fillClass = usedPct >= 95 ? 'danger' : (usedPct >= 85 ? 'warning' : '');
+    
+    const drivePathNorm = (d.path || '').toUpperCase().replace(/\\/g, '/');
+    const curPathNorm = (activeModalBrowsePath || '').toUpperCase().replace(/\\/g, '/');
+    const isActive = curPathNorm && (curPathNorm.startsWith(drivePathNorm) || (d.letter && curPathNorm.startsWith(d.letter.toUpperCase() + ':')));
+
+    const card = document.createElement('div');
+    card.className = 'drive-card' + (isActive ? ' active' : '');
+    
+    const iconSvg = d.is_system
+      ? '<svg class="icon" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M4 14v-4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/></svg>'
+      : '<svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
+
+    const badgeLabel = isActive ? 'Active' : (d.letter ? d.letter + ':' : 'Disk');
+
+    card.innerHTML = `
+      <div class="drive-card-top">
+        <div class="drive-card-title">
+          ${iconSvg}
+          <span>${escapeHtml(d.label || d.name)}</span>
+        </div>
+        <span class="drive-card-badge">${badgeLabel}</span>
+      </div>
+      <div class="drive-card-meter">
+        <div class="drive-card-meter-fill ${fillClass}" style="width: ${Math.min(100, Math.max(0, usedPct))}%;"></div>
+      </div>
+      <div class="drive-card-info">
+        <span>${escapeHtml(d.free_gb)} GB Free</span>
+        <span>${usedPct}% used</span>
+      </div>
+    `;
+
+    card.onclick = () => browseModalPath(d.path);
+    drivesBar.appendChild(card);
+  });
+}
+
+function parseModalPathSegments(fullPath) {
+  if (!fullPath) return [];
+  const normalized = fullPath.replace(/\\/g, '/');
+  const isWindows = /^[a-zA-Z]:/.test(normalized);
+  const segments = [];
+  const parts = normalized.split('/').filter(p => p.length > 0);
+
+  if (isWindows && parts.length > 0) {
+    const driveLetter = parts[0];
+    let accumulated = driveLetter + '\\';
+    segments.push({ name: driveLetter + '\\', path: accumulated });
+    
+    for (let i = 1; i < parts.length; i++) {
+      accumulated = accumulated + (accumulated.endsWith('\\') ? '' : '\\') + parts[i];
+      segments.push({ name: parts[i], path: accumulated });
+    }
+  } else {
+    let accumulated = '';
+    segments.push({ name: '/', path: '/' });
+    for (let i = 0; i < parts.length; i++) {
+      accumulated += '/' + parts[i];
+      segments.push({ name: parts[i], path: accumulated });
+    }
+  }
+  return segments;
+}
+
+function renderModalBreadcrumbs(fullPath, isRoot) {
+  const trailEl = document.getElementById('modalBreadcrumbTrail');
+  if (!trailEl) return;
+  trailEl.innerHTML = '';
+
+  if (isRoot || !fullPath) {
+    trailEl.innerHTML = '<span class="crumb-btn active">PC Storage Drives</span>';
+    return;
+  }
+
+  const segments = parseModalPathSegments(fullPath);
+  if (segments.length === 0) {
+    trailEl.innerHTML = '<span class="crumb-btn active">' + escapeHtml(fullPath) + '</span>';
+    return;
+  }
+
+  segments.forEach((seg, idx) => {
+    const isLast = idx === segments.length - 1;
+    if (isLast) {
+      const activeCrumb = document.createElement('span');
+      activeCrumb.className = 'crumb-btn active';
+      activeCrumb.textContent = seg.name;
+      activeCrumb.title = seg.path;
+      trailEl.appendChild(activeCrumb);
+    } else {
+      const crumbBtn = document.createElement('button');
+      crumbBtn.className = 'crumb-btn';
+      crumbBtn.type = 'button';
+      crumbBtn.textContent = seg.name;
+      crumbBtn.title = seg.path;
+      crumbBtn.onclick = () => browseModalPath(seg.path);
+      trailEl.appendChild(crumbBtn);
+
+      const divider = document.createElement('span');
+      divider.className = 'crumb-divider';
+      divider.textContent = '›';
+      trailEl.appendChild(divider);
+    }
+  });
+
+  trailEl.scrollLeft = trailEl.scrollWidth;
+}
+
+function modalNavigateUp() {
+  if (modalParentPath !== undefined && modalParentPath !== '') {
+    browseModalPath(modalParentPath);
+  } else if (!modalIsRoot) {
+    browseModalPath('');
+  }
+}
+
+function toggleManualPathInput() {
+  const row = document.getElementById('modalManualPathRow');
+  if (!row) return;
+  const isShown = row.style.display !== 'none';
+  row.style.display = isShown ? 'none' : 'flex';
+  if (!isShown) {
+    const input = document.getElementById('modalCurrentPathInput');
+    if (input) {
+      input.value = activeModalBrowsePath;
+      input.focus();
+      input.select();
+    }
+  }
+}
+
+function filterModalFolders() {
+  const input = document.getElementById('modalFolderFilterInput');
+  const clearBtn = document.getElementById('modalFilterClearBtn');
+  const badge = document.getElementById('modalFilterMatchCount');
+  const listEl = document.getElementById('modalFolderTreeList');
+  if (!listEl) return;
+
+  const query = (input?.value || '').trim().toLowerCase();
+  if (clearBtn) clearBtn.style.display = query ? 'flex' : 'none';
+
+  const filtered = query
+    ? modalCurrentSubdirs.filter(s => (s.name || '').toLowerCase().includes(query))
+    : modalCurrentSubdirs;
+
+  if (badge) {
+    if (query) {
+      badge.textContent = `${filtered.length} / ${modalCurrentSubdirs.length}`;
+    } else {
+      badge.textContent = modalCurrentSubdirs.length ? `${modalCurrentSubdirs.length} folders` : '';
+    }
+  }
+
+  listEl.innerHTML = '';
+  modalFocusedFolderIndex = -1;
+
+  if (filtered.length === 0) {
+    if (modalCurrentSubdirs.length === 0 && !modalIsRoot) {
+      const emptyDiv = document.createElement('div');
+      emptyDiv.style.padding = '24px 16px';
+      emptyDiv.style.color = 'var(--text-tertiary)';
+      emptyDiv.style.textAlign = 'center';
+      emptyDiv.textContent = 'No subfolders in this directory';
+      listEl.appendChild(emptyDiv);
+    } else if (query) {
+      const noMatchDiv = document.createElement('div');
+      noMatchDiv.style.padding = '24px 16px';
+      noMatchDiv.style.color = 'var(--text-tertiary)';
+      noMatchDiv.style.textAlign = 'center';
+      noMatchDiv.innerHTML = `
+        <div>No folders match "${escapeHtml(query)}"</div>
+        <button class="btn btn-ghost btn-sm" onclick="clearModalFilter()" style="margin-top: 8px;">Clear filter</button>
+      `;
+      listEl.appendChild(noMatchDiv);
+    }
+    return;
+  }
+
+  filtered.forEach((s, idx) => {
+    const itemRow = document.createElement('div');
+    itemRow.className = 'folder-tree-item';
+    itemRow.setAttribute('data-index', idx);
+    itemRow.setAttribute('data-path', s.path);
+    itemRow.innerHTML = `
+      <div class="folder-tree-item-name">
+        <svg class="icon" style="color: #fbbf24;" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+        <span title="${escapeHtml(s.name)}">${escapeHtml(s.name)}</span>
+      </div>
+      <svg class="icon" style="color: var(--text-tertiary);" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    `;
+    itemRow.onclick = () => browseModalPath(s.path);
+    listEl.appendChild(itemRow);
+  });
+}
+
+function clearModalFilter() {
+  const input = document.getElementById('modalFolderFilterInput');
+  if (input) {
+    input.value = '';
+    filterModalFolders();
+    input.focus();
+  }
+}
+
+function toggleInlineFolderCreator(show) {
+  const creator = document.getElementById('modalInlineFolderCreator');
+  const input = document.getElementById('inlineNewFolderName');
+  if (!creator) return;
+
+  if (show === undefined) {
+    show = creator.style.display === 'none';
+  }
+
+  creator.style.display = show ? 'flex' : 'none';
+  if (show) {
+    if (input) {
+      input.value = '';
+      input.focus();
+    }
+  }
+}
+
+function promptCreateNewFolder() {
+  toggleInlineFolderCreator(true);
+}
+
+async function submitInlineNewFolder() {
+  const input = document.getElementById('inlineNewFolderName');
+  const name = (input?.value || '').trim();
+  if (!name) {
+    showToast('Please enter a folder name', 'error');
+    if (input) input.focus();
+    return;
+  }
+
+  if (/[\\/:*?"<>|]/.test(name)) {
+    showToast('Folder name contains invalid characters', 'error');
+    if (input) input.focus();
+    return;
+  }
+
   try {
     const res = await fetch('/api/create_folder', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ parent: activeModalBrowsePath, name: name.trim() })
+      body: JSON.stringify({ parent: activeModalBrowsePath, name: name })
     });
     const data = await res.json();
     if (data.success || data.status === 'ok') {
       showToast('Created folder: ' + name, 'success');
-      browseModalPath(data.path || activeModalBrowsePath);
+      toggleInlineFolderCreator(false);
+      browseModalPath(data.path || (activeModalBrowsePath ? activeModalBrowsePath + '\\' + name : name));
     } else {
-      showToast('Could not create folder: ' + data.error, 'error');
+      showToast('Could not create folder: ' + (data.error || 'Unknown error'), 'error');
     }
   } catch (e) {
-    showToast('Failed: ' + e, 'error');
+    showToast('Failed to create folder: ' + e.message, 'error');
   }
 }
 
 async function confirmModalFolderSelection() {
-  const chosen = document.getElementById('modalCurrentPathInput').value.trim();
+  const chosen = (activeModalBrowsePath || document.getElementById('modalCurrentPathInput')?.value || '').trim();
   if (!chosen) return;
 
   try {
@@ -3457,17 +4132,87 @@ async function confirmModalFolderSelection() {
         document.getElementById('recvPathText').textContent = chosen;
       } else {
         document.getElementById('sharePathText').textContent = chosen;
-        document.getElementById('shareStorageMeter').style.display = 'flex';
+        const shareMeter = document.getElementById('shareStorageMeter');
+        if (shareMeter) shareMeter.style.display = 'flex';
       }
       fetchStorageMetrics();
       loadDirectory(activeTab, '', true);
     } else {
-      showToast('Error setting path: ' + data.error, 'error');
+      showToast('Error setting path: ' + (data.error || 'Unknown error'), 'error');
     }
   } catch (e) {
-    showToast('Failed to update folder: ' + e, 'error');
+    showToast('Failed to update folder: ' + e.message, 'error');
   }
 }
+
+// In-Modal Keyboard Navigation & Shortcuts
+document.addEventListener('DOMContentLoaded', () => {
+  const filterInput = document.getElementById('modalFolderFilterInput');
+  if (filterInput) {
+    filterInput.addEventListener('input', () => filterModalFolders());
+    filterInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const items = document.querySelectorAll('#modalFolderTreeList .folder-tree-item');
+        if (items.length === 1) {
+          const path = items[0].getAttribute('data-path');
+          if (path) browseModalPath(path);
+        } else if (!filterInput.value.trim() && activeModalBrowsePath) {
+          confirmModalFolderSelection();
+        }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        const items = document.querySelectorAll('#modalFolderTreeList .folder-tree-item');
+        if (items.length > 0) {
+          modalFocusedFolderIndex = 0;
+          items.forEach((it, i) => it.classList.toggle('focused', i === 0));
+          items[0].scrollIntoView({ block: 'nearest' });
+          document.getElementById('modalFolderTreeList')?.focus();
+        }
+      }
+    });
+  }
+
+  const inlineInput = document.getElementById('inlineNewFolderName');
+  if (inlineInput) {
+    inlineInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        submitInlineNewFolder();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleInlineFolderCreator(false);
+      }
+    });
+  }
+
+  const treeList = document.getElementById('modalFolderTreeList');
+  if (treeList) {
+    treeList.addEventListener('keydown', (e) => {
+      const items = Array.from(treeList.querySelectorAll('.folder-tree-item'));
+      if (items.length === 0) return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        modalFocusedFolderIndex = Math.min(items.length - 1, modalFocusedFolderIndex + 1);
+        items.forEach((it, i) => it.classList.toggle('focused', i === modalFocusedFolderIndex));
+        if (modalFocusedFolderIndex >= 0) items[modalFocusedFolderIndex].scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        modalFocusedFolderIndex = Math.max(0, modalFocusedFolderIndex - 1);
+        items.forEach((it, i) => it.classList.toggle('focused', i === modalFocusedFolderIndex));
+        if (modalFocusedFolderIndex >= 0) items[modalFocusedFolderIndex].scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (modalFocusedFolderIndex >= 0 && modalFocusedFolderIndex < items.length) {
+          const path = items[modalFocusedFolderIndex].getAttribute('data-path');
+          if (path) browseModalPath(path);
+        }
+      }
+    });
+  }
+});
 
 /* ═══════════════════════════════════════════════════════════════════════════════
    HOST OS INTEGRATION (PowerShell STA Picker & OS Explorer Spawner)

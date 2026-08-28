@@ -1,106 +1,103 @@
-# Project: TurboShare Complete Overhaul
+# Project: TurboShare Host Folder Navigator Modal Overhaul
 
 ## Architecture
-TurboShare is a high-speed, zero-dependency, 2-way cross-device local file transfer hub for PC-to-PC direct Ethernet, Wi-Fi, and Mobile Hotspot. The system is architected as a clean, high-performance Python application with an embedded modern single-page web interface.
+TurboShare is a high-speed, zero-dependency, 2-way cross-device local file transfer hub. The Host Folder Navigator modal (`#hostBrowserModal`) is the primary interface through which host and remote users select destination and shared directories across Windows host drives and mobile/desktop clients.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        TurboShare Client (Web UI)                       │
-│  - Obsidian Dark Theme (#090a0c) & Surface Ladder (#111215 - #22232a)  │
-│  - 35+ Stroke-based Crisp Vector SVG Icons (Zero cartoon emojis)       │
-│  - Inter & JetBrains Mono (font-variant-numeric: tabular-nums)         │
-│  - Interactive In-Browser Drive & Folder Navigator Modal                │
-│  - Network Links Ribbon (Mouse-wheel deltaX, Chevrons, Grid Toggle)    │
-│  - File Explorer (Dual Tabs, Real-time Search/Filter, Storage Gauges)  │
-│  - Full-Window Drag-and-Drop Overlay & Mobile Media Upload Picker      │
-│  - Mobile Viewport min-h-[100dvh], >=44px Touch Targets, Bottom Sheets │
+│             TurboShare Folder Navigator Modal Overhaul UI              │
+│  - Linear / Apple Files Obsidian Aesthetic (#090a0c, hairline borders) │
+│  - Compact Tactile Drive Cards with Visual Storage Progress Meters    │
+│  - Interactive Segmented Breadcrumbs with Ancestor Jumping & Up-Level  │
+│  - Instant Live Subdirectory Quick-Filter with Matching Count Badge   │
+│  - Sleek Inline "+ New Folder" Creation Interface                     │
+│  - Mobile Bottom-Sheet Drawer (Drag handle pill, sticky header/footer) │
+│  - Desktop Centered Modal (max-w 680px, backdrop blur, full keyboard)  │
+│  - Strict >=44px/48px Touch Targets for Thumb Ergonomics               │
 └───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP / REST APIs
+                                    │ HTTP / JSON APIs
 ┌───────────────────────────────────▼────────────────────────────────────┐
 │                    TurboShare Backend (Python 3 Server)                 │
-│  - ThreadingHTTPServer with SO_REUSEADDR & 1MB Socket Buffers          │
-│  - Drive & Directory Traversal Engine (/api/browse_host, disk_usage)   │
-│  - Host OS Integration (PowerShell STA Folder Dialog, explorer.exe)    │
-│  - Smart Resumable Chunked Upload Protocol (/api/check, atomic r+b)    │
-│  - Dual-Tab Storage Management (UPLOAD_DIR & HOST_SHARE isolation)     │
-│  - Real-time Zip Streaming Engine (/api/zip)                           │
-│  - Multi-Adapter Network Discovery (Wi-Fi, Ethernet, Hotspot, P2P)     │
+│  - /api/browse_host: Drives & subdirectories with total/used/free GB   │
+│  - /api/create_folder: Thread-safe directory creation with validation  │
+│  - /api/set_path: Destination path configuration & disk usage refresh  │
+│  - /api/validate_path: Real-time path validation                       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Status | Source |
 |---|---------|-------------|-----------|--------|--------|
-| 1 | In-Browser Host Folder Navigator | Navigate host drives (C:\, D:\, etc.) & subdirectories via modal from any device | M1, M2 | DONE | ORIGINAL_REQUEST §R1 |
-| 2 | Robust PowerShell STA Folder Dialog | Non-blocking background STA Windows FolderBrowserDialog with foreground focus | M1 | DONE | ORIGINAL_REQUEST §R1 |
-| 3 | Manual Path Input & Instant Validation | Live drive free-space detection (shutil.disk_usage) and validation | M1, M2 | DONE | ORIGINAL_REQUEST §R1 |
-| 4 | "Open in OS" Foreground Explorer | Subprocess explorer.exe foreground launch with remote client viewing fallback | M1, M2 | DONE | ORIGINAL_REQUEST §R1 |
-| 5 | Network Links Desktop Wheel Scroll | Mouse-wheel deltaY-to-scrollLeft translation & scroll chevron buttons | M2 | DONE | ORIGINAL_REQUEST §R2 |
-| 6 | Network Links Mobile Momentum & Grid View | Touch momentum swipe & toggleable ribbon/grid view for multi-adapter layout | M2 | DONE | ORIGINAL_REQUEST §R2 |
-| 7 | Min 44px Touch Hit Targets | Accessible touch targets across all mobile interactive elements | M2 | DONE | ORIGINAL_REQUEST §R2 |
-| 8 | Mobile-First Layout (<860px to 360px) | Clean card stacking, zero horizontal window blowout, min-h-[100dvh] | M2 | DONE | ORIGINAL_REQUEST §R3 |
-| 9 | File Explorer Search & Storage Gauges | Real-time search filter, metadata columns, visual storage capacity meters | M2 | DONE | ORIGINAL_REQUEST §R3 |
-| 10| Full-Window Drag & Drop Overlay | Window-wide dragover feedback with backdrop blur and mobile file picker | M2 | DONE | ORIGINAL_REQUEST §R3 |
-| 11| 100% Vector SVG Icon Suite | Obsidian dark theme (#090a0c), Inter + JetBrains Mono, strictly 0 emojis | M2 | DONE | ORIGINAL_REQUEST §R3 |
-| 12| Smart Transfer Resumption | /api/check offset detection and atomic r+b seek/truncate append mode | M1 | DONE | ORIGINAL_REQUEST Acceptance |
-| 13| Dual Tabs & Instant ZIP Actions | "Received Files" & "Host Shared Files" isolation with folder ZIP downloads | M1, M2 | DONE | ORIGINAL_REQUEST Acceptance |
-| 14| End-to-End Live Verification | Port 8080 checks, DevTools 0 console errors, mobile viewport screenshots | M3 | DONE | ORIGINAL_REQUEST Acceptance |
+| 1 | Isolated Git Branch Workflow | All development exclusively on `feature/improved-folder-dialog` (keep `main` pristine) | M1 | IN_PROGRESS | ORIGINAL_REQUEST §R0 |
+| 2 | Compact Visual Drive Cards | Tactile cards with drive icon, letter, volume label, active glow ring/badge | M2 | IN_PROGRESS | ORIGINAL_REQUEST §R1 |
+| 3 | Storage Capacity Progress Meters | Used/free GB readout, percentage bar with >85% warning & >=95% critical colors | M2 | IN_PROGRESS | ORIGINAL_REQUEST §R1 |
+| 4 | Mobile Touch-Scrollable Drive Ribbon | Snap alignment (`scroll-snap-type: x mandatory`), >=44px height for touch access | M2 | IN_PROGRESS | ORIGINAL_REQUEST §R1 |
+| 5 | Interactive Breadcrumb Trail | Clickable ancestor segment pills jumping directly to ancestor directory | M3 | IN_PROGRESS | ORIGINAL_REQUEST §R2 |
+| 6 | Up-Level Navigation & Path Input Toggle | Dedicated "Up One Level" jump button and toggle for manual path input | M3 | IN_PROGRESS | ORIGINAL_REQUEST §R2 |
+| 7 | Instant Live Folder Quick-Filter | Client-side search bar with live counter badge (`X of Y folders`) & clear button | M3 | IN_PROGRESS | ORIGINAL_REQUEST §R2 |
+| 8 | Inline "+ New Folder" Action | Sleek inline creation card with input and instant validation (replacing `prompt`) | M3 | IN_PROGRESS | ORIGINAL_REQUEST §R2 |
+| 9 | Mobile Bottom-Sheet Drawer | Native slide-up drawer transition, drag handle pill (`---`), sticky header/footer | M4 | IN_PROGRESS | ORIGINAL_REQUEST §R3 |
+| 10| Mobile Touch Target Ergonomics | >=48px folder row heights, >=44px action buttons, zero horizontal scroll blowout | M4 | IN_PROGRESS | ORIGINAL_REQUEST §R3 |
+| 11| Desktop Modal & Keyboard Shortcuts | Centered 680px modal, backdrop blur, Escape to close, Enter to navigate, Arrow keys | M4 | IN_PROGRESS | ORIGINAL_REQUEST §R3 |
+| 12| 100% Backward Compatibility | Full API schema compliance for `/api/browse_host`, `/api/create_folder`, `/api/set_path` | M1, M5 | IN_PROGRESS | ORIGINAL_REQUEST §R4 |
+| 13| Comprehensive Test & Visual Verification | Pass all 29 tests in `test_turboshare.py`, Playwright 1280x800 & 360x740 snapshots | M5 | IN_PROGRESS | ORIGINAL_REQUEST §R4 |
+| 14| Remote Branch Push to Origin | Push finalized `feature/improved-folder-dialog` branch to GitHub origin | M5 | IN_PROGRESS | ORIGINAL_REQUEST §R4 |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status | Output |
 |---|------|-------|-------------|--------|--------|
-| M1 | Core Backend & Host Integration Engine | API endpoints (/api/browse_host, /api/pick_folder, /api/open_folder, /api/check, /api/upload, /api/zip, /api/set_path), PowerShell STA dialog, explorer.exe foreground launcher, atomic seek/truncate resumption | None | DONE | turboshare.py, file_drop_server.py |
-| M2 | Developer-Tool Obsidian Frontend Overhaul | Complete HTML/CSS/JS single-page overhaul: Obsidian palette (#090a0c), 35+ vector SVGs, in-browser folder browser modal, network links ribbon + grid toggle + wheel scroll, explorer search/filter & storage meter, full-window drop overlay, mobile layout (<860px down to 360px) | M1 | DONE | turboshare.py, file_drop_server.py |
-| M3 | Integration, Adversarial Hardening & Live Verification | Live server execution on port 8080, Chrome DevTools console audit (0 errors), mobile viewport verification (360px–1280px), transfer resume stress test (35 tests pass), forensic audit (CLEAN) | M1, M2 | DONE | test_turboshare.py, tests/test_adversarial_backend.py, verify_playwright.py |
+| M1 | Branch Setup & Backend Drive Capacity Schema | Verify `feature/improved-folder-dialog` branch, ensure `/api/browse_host` supplies complete drive metrics | None | IN_PROGRESS | turboshare.py, file_drop_server.py |
+| M2 | Visual Drive Cards & Storage Meters | Tactile Drive Cards, capacity progress bars, warning colors, mobile snap ribbon | M1 | IN_PROGRESS | turboshare.py, file_drop_server.py |
+| M3 | Interactive Breadcrumbs & Quick-Filter | Clickable ancestor pills, up-one-level button, live search filter, inline folder creator | M1, M2 | IN_PROGRESS | turboshare.py, file_drop_server.py |
+| M4 | Mobile Bottom-Sheet & Desktop Modal Ergonomics | Bottom-sheet slide transition, drag handle, sticky header/footer, >=48px targets, keyboard shortcuts | M2, M3 | IN_PROGRESS | turboshare.py, file_drop_server.py |
+| M5 | Multi-Agent Review, Adversarial QA & Visual Verification | 29/29 automated tests, Playwright snapshots (Desktop 1280x800 & Mobile 360x740), 0 console errors, push branch to origin | M1-M4 | IN_PROGRESS | test_turboshare.py, visual snapshots |
 
 ## Interface Contracts
 
 ### GET /api/browse_host?path=<optional_path>
-- **Query params**: `path` (e.g. `C:\Users`, empty/omitted returns root drives)
 - **Response**:
 ```json
 {
-  "current_path": "C:\\Users",
-  "parent_path": "C:\\",
+  "current_path": "C:\\Users\\piklu",
+  "parent_path": "C:\\Users",
   "drives": [
-    {"name": "C:\\", "path": "C:\\", "label": "Local Disk", "free_gb": 142.5, "total_gb": 476.2, "is_system": true}
+    {
+      "name": "C:\\",
+      "path": "C:\\",
+      "label": "OS (C:)",
+      "free_gb": 70.5,
+      "total_gb": 476.2,
+      "used_gb": 405.7,
+      "used_percent": 85.2,
+      "is_system": true
+    }
   ],
   "subdirs": [
-    {"name": "piklu", "path": "C:\\Users\\piklu", "modified": 1712345678}
+    {
+      "name": "Projects",
+      "path": "C:\\Users\\piklu\\Projects",
+      "modified": 1712345678
+    }
   ],
   "is_root": false,
-  "free_gb": 142.5,
-  "total_gb": 476.2
+  "free_gb": 70.5,
+  "total_gb": 476.2,
+  "used_gb": 405.7,
+  "used_percent": 85.2
 }
 ```
 
+### POST /api/create_folder
+- **Body**: `{"path": "C:\\Users\\piklu\\NewFolder"}`
+- **Response**: `{"status": "ok", "path": "C:\\Users\\piklu\\NewFolder"}`
+
 ### POST /api/set_path
-- **Request body**: `{"path": "D:\\SharedFolder", "type": "recv" | "share"}`
-- **Response**: `{"success": true, "status": "ok", "path": "D:\\SharedFolder", "type": "recv", "free_gb": 210.4}`
-
-### POST /api/open_folder
-- **Request body / query**: `type=recv` or `type=share`
-- **Response**: `{"status": "ok", "is_local": true, "message": "Opened folder in Windows Explorer"}` (if remote: `{"status": "ok", "is_local": false, "message": "Folder opened on host PC; viewing in browser"}`)
-
-### POST /api/pick_folder
-- **Request body / query**: `type=recv` or `type=share`
-- **Response**: `{"status": "ok", "path": "D:\\SelectedPath"}` or `{"status": "cancelled"}`
-
-### GET /api/check?path=<name>&target=<recv|share>
-- **Response**: `{"exists": true, "size": 10485760}` (returns exact byte size on disk for client chunk resumption)
-
-### POST /api/upload
-- **Query**: `path=<name>&offset=<bytes>&target=<recv|share>`
-- **Body**: Binary chunk stream
-- **Response**: `{"success": true, "status": "ok", "path": "<name>", "size": <bytes>}`
-
-### GET /api/zip?path=<rel_path>&target=<recv|share>
-- **Response**: Binary `application/zip` stream with `Content-Disposition: attachment; filename="<folder_name>.zip"`
+- **Body**: `{"path": "C:\\Users\\piklu\\Projects", "type": "recv" | "share"}`
+- **Response**: `{"success": true, "status": "ok", "path": "C:\\Users\\piklu\\Projects", "type": "recv", "free_gb": 70.5}`
 
 ## Code Layout
 - `c:\Users\piklu\Documents\turboshare\turboshare.py` (Primary monolithic, self-contained server + embedded SPA frontend)
 - `c:\Users\piklu\Documents\turboshare\file_drop_server.py` (100% bit-for-bit identical synchronized copy)
 - `c:\Users\piklu\Documents\turboshare\test_turboshare.py` (Functional test suite — 29 tests)
 - `c:\Users\piklu\Documents\turboshare\tests\test_adversarial_backend.py` (Adversarial stress test suite — 35 tests)
-- `c:\Users\piklu\Documents\turboshare\verify_playwright.py` (Multi-viewport live browser audit — 10 viewports)
-- `c:\Users\piklu\Documents\turboshare\Run_TurboShare.bat` (Host launcher script)
+- `c:\Users\piklu\Documents\turboshare\verify_playwright.py` (Multi-viewport live browser audit)
