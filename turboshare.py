@@ -1632,6 +1632,56 @@ body {
   margin: 0 auto;
 }
 
+/* Drive Ribbon Wrapper & Chevrons */
+.drive-ribbon-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.drive-ribbon-arrow {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  z-index: 2;
+  padding: 0;
+}
+
+.drive-ribbon-arrow:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.drive-ribbon-arrow.disabled {
+  opacity: 0.25;
+  cursor: default;
+  pointer-events: none;
+  transform: none;
+}
+
+.drive-ribbon-arrow svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* Drive Cards Ribbon */
 .drive-cards-ribbon {
   display: flex;
@@ -1641,6 +1691,9 @@ body {
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
+  scroll-behavior: smooth;
+  flex: 1;
+  min-width: 0;
 }
 .drive-cards-ribbon::-webkit-scrollbar { display: none; }
 
@@ -2418,7 +2471,8 @@ body {
     padding: 6px 8px;
     gap: 6px;
   }
-  .scroll-chevron {
+  .scroll-chevron,
+  .drive-ribbon-arrow {
     display: none !important;
   }
   .net-item {
@@ -2903,9 +2957,17 @@ body {
     </div>
 
     <div class="modal-body" style="gap: 10px; padding: 14px 16px; overflow: hidden; display: flex; flex-direction: column; flex: 1;">
-      <!-- Drives Cards Ribbon -->
-      <div class="drive-cards-ribbon" id="modalDrivesBar" aria-label="Host Storage Drives">
-        <!-- Rendered via JS -->
+      <!-- Drives Cards Ribbon with Scroll Chevrons -->
+      <div class="drive-ribbon-wrapper">
+        <button class="icon-btn drive-ribbon-arrow left" id="driveRibbonLeft" onclick="scrollDriveRibbon(-1)" title="Scroll left" aria-label="Scroll left">
+          <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <div class="drive-cards-ribbon" id="modalDrivesBar" aria-label="Host Storage Drives">
+          <!-- Rendered via JS -->
+        </div>
+        <button class="icon-btn drive-ribbon-arrow right" id="driveRibbonRight" onclick="scrollDriveRibbon(1)" title="Scroll right" aria-label="Scroll right">
+          <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
       </div>
 
       <!-- Segmented Breadcrumbs & Action Toolbar -->
@@ -3805,6 +3867,7 @@ function openHostBrowserModal(target) {
   
   setTimeout(() => {
     if (filterInput) filterInput.focus();
+    updateDriveArrows();
   }, 100);
 }
 
@@ -3890,6 +3953,44 @@ function renderModalDrives(drives) {
     card.onclick = () => browseModalPath(d.path);
     drivesBar.appendChild(card);
   });
+
+  setupDriveRibbonListeners();
+  setTimeout(updateDriveArrows, 60);
+}
+
+function scrollDriveRibbon(dir) {
+  const bar = document.getElementById('modalDrivesBar');
+  if (!bar) return;
+  const scrollAmount = 220;
+  bar.scrollBy({ left: dir * scrollAmount, behavior: 'smooth' });
+  setTimeout(updateDriveArrows, 250);
+}
+
+function updateDriveArrows() {
+  const bar = document.getElementById('modalDrivesBar');
+  const btnL = document.getElementById('driveRibbonLeft');
+  const btnR = document.getElementById('driveRibbonRight');
+  if (!bar || !btnL || !btnR) return;
+  const canScrollLeft = bar.scrollLeft > 6;
+  const canScrollRight = bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 6;
+  btnL.classList.toggle('disabled', !canScrollLeft);
+  btnR.classList.toggle('disabled', !canScrollRight);
+}
+
+function setupDriveRibbonListeners() {
+  const bar = document.getElementById('modalDrivesBar');
+  if (bar && !bar._wheelAttached) {
+    bar._wheelAttached = true;
+    bar.addEventListener('wheel', (e) => {
+      if (e.deltaY !== 0) {
+        e.preventDefault();
+        bar.scrollLeft += e.deltaY;
+        updateDriveArrows();
+      }
+    }, { passive: false });
+    bar.addEventListener('scroll', updateDriveArrows);
+    window.addEventListener('resize', updateDriveArrows);
+  }
 }
 
 function parseModalPathSegments(fullPath) {
