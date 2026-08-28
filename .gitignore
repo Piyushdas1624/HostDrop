@@ -4,6 +4,10 @@ __pycache__/
 *$py.class
 *.pyc
 
+# Temporary test scripts
+temp_script.js
+live_rendered_script.js
+
 # Virtual environments
 .venv/
 venv/

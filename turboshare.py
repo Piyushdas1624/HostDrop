@@ -8,9 +8,16 @@ import zipfile
 import mimetypes
 import urllib.parse
 import html
+import subprocess
+import threading
+import time
+import datetime
+import string
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-# ── Force UTF-8 on Windows Console ─────────────────────────────────────────────
+ThreadingHTTPServer.allow_reuse_address = True
+
+# ── Force UTF-8 Console Output on Windows ──────────────────────────────────────
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -18,7 +25,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# ── Optional libraries ─────────────────────────────────────────────────────────
+# ── Optional Helper Libraries ───────────────────────────────────────────────────
 try:
     import psutil
 except ImportError:
@@ -29,18 +36,28 @@ try:
 except ImportError:
     qrcode = None
 
-# ── Global State ───────────────────────────────────────────────────────────────
-UPLOAD_DIR  = ""   # Where files sent to the host are stored (Received)
-HOST_SHARE  = ""   # Folder shared by host for others to download (Shared)
+# ── Global State & Thread Synchronization ───────────────────────────────────────
+STATE_LOCK = threading.Lock()
+UPLOAD_DIR = ""   # Where received files sent to the host are stored (Received Files tab)
+HOST_SHARE = ""   # Folder shared by host for others to browse/download (Host Shared Files tab)
 SERVER_PORT = 8080
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  NETWORK DISCOVERY
+#  NETWORK DISCOVERY & ADAPTER CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 def get_network_interfaces():
+    """
+    Enumerate all IPv4 network adapters, classifying them by priority:
+    1. Wi-Fi (Wireless LAN)
+    2. Mobile Hotspot (192.168.137.x or 'hotspot')
+    3. Direct Cable P2P (169.254.x.x APIPA) & Wired Ethernet LAN
+    8. Generic LAN / Other
+    9. Virtual Switches (WSL, Hyper-V, VMware, Docker)
+    10. Bluetooth PAN
+    """
     interfaces = []
-    seen = set()
+    seen_ips = set()
 
     if psutil:
         try:
@@ -48,35 +65,52 @@ def get_network_interfaces():
                 for a in addrs:
                     if a.family == socket.AF_INET and not a.address.startswith("127."):
                         ip = a.address
-                        if ip in seen:
+                        if ip in seen_ips:
                             continue
-                        seen.add(ip)
+                        seen_ips.add(ip)
                         lo = name.lower()
-                        if "vethernet" in lo or "switch" in lo or "wsl" in lo or "hyper" in lo:
-                            kind, label, pri = "virtual", "Virtual / WSL", 9
+                        
+                        if "vethernet" in lo or "switch" in lo or "wsl" in lo or "hyper" in lo or "docker" in lo or "vmware" in lo:
+                            kind, label, desc, pri = "virtual", "Virtual / WSL", "Internal Virtual Switch", 9
                         elif "wi-fi" in lo or "wireless" in lo or "wlan" in lo:
-                            kind, label, pri = "wifi", "Wi-Fi", 1
+                            kind, label, desc, pri = "wifi", "Wi-Fi Network", "Home/Office Wireless LAN", 1
                         elif ip.startswith("192.168.137.") or "hotspot" in lo or "host" in lo:
-                            kind, label, pri = "hotspot", "Mobile Hotspot", 2
-                        elif "ethernet" in lo or "eth" in lo:
+                            kind, label, desc, pri = "hotspot", "Mobile Hotspot", "Tethered Hotspot Devices", 2
+                        elif "ethernet" in lo or "eth" in lo or "lan" in lo:
                             if ip.startswith("169.254."):
-                                kind, label, pri = "ethernet-direct", "Direct Cable (P2P)", 3
+                                kind, label, desc, pri = "ethernet-direct", "Direct Cable (P2P)", "High-Speed Direct Link (90-115 MB/s)", 3
                             else:
-                                kind, label, pri = "ethernet", "Ethernet LAN", 3
+                                kind, label, desc, pri = "ethernet", "Ethernet LAN", "Wired Gigabit Network (60-110 MB/s)", 3
                         elif "bluetooth" in lo:
-                            kind, label, pri = "bluetooth", "Bluetooth PAN", 10
+                            kind, label, desc, pri = "bluetooth", "Bluetooth PAN", "Bluetooth Tethering", 10
                         else:
-                            kind, label, pri = "lan", "Local Network", 8
-                        interfaces.append(dict(ip=ip, name=name, kind=kind, label=label, priority=pri))
+                            kind, label, desc, pri = "lan", "Local Network", "Connected Network Interface", 8
+
+                        interfaces.append({
+                            "ip": ip,
+                            "name": name,
+                            "kind": kind,
+                            "label": label,
+                            "desc": desc,
+                            "priority": pri
+                        })
         except Exception:
             pass
 
+    # Fallback to standard socket resolution if psutil is unavailable or returned empty
     if not interfaces:
         try:
             for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
-                if not ip.startswith("127.") and ip not in seen:
-                    interfaces.append(dict(ip=ip, name="Network", kind="lan", label="Local Network", priority=5))
-                    seen.add(ip)
+                if not ip.startswith("127.") and ip not in seen_ips:
+                    interfaces.append({
+                        "ip": ip,
+                        "name": "Local Network",
+                        "kind": "lan",
+                        "label": "Local Network",
+                        "desc": "Standard Network Adapter",
+                        "priority": 5
+                    })
+                    seen_ips.add(ip)
         except Exception:
             pass
 
@@ -84,252 +118,768 @@ def get_network_interfaces():
     return interfaces
 
 
+def get_local_ip_set():
+    """Return a set of all IPv4 strings belonging to local host interfaces."""
+    ips = {"127.0.0.1", "::1", "localhost"}
+    for iface in get_network_interfaces():
+        ips.add(iface["ip"])
+    return ips
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FILESYSTEM & HOST INTEGRATION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
 def disk_info(path):
+    """Calculate free, total, used percentage and formatted metrics for a path."""
+    if not path:
+        return {"free_gb": "?", "total_gb": "?", "used_pct": 0, "free_bytes": 0, "total_bytes": 0}
     try:
         total, used, free = shutil.disk_usage(path)
         return {
-            "free_gb": f"{free/1024**3:.1f}",
-            "total_gb": f"{total/1024**3:.1f}",
-            "used_pct": int(used * 100 // total)
+            "free_gb": f"{free / (1024**3):.1f}",
+            "total_gb": f"{total / (1024**3):.1f}",
+            "used_pct": int(used * 100 // total) if total > 0 else 0,
+            "free_bytes": free,
+            "total_bytes": total
         }
     except Exception:
-        return {"free_gb": "?", "total_gb": "?", "used_pct": 0}
+        return {"free_gb": "?", "total_gb": "?", "used_pct": 0, "free_bytes": 0, "total_bytes": 0}
 
 
 def safe_path(base_dir, rel):
+    """
+    Prevent directory traversal attacks by ensuring the resolved path
+    is strictly contained inside base_dir.
+    """
     if not base_dir:
         return None
-    rel = rel.replace("\\", "/").strip("/")
+    rel = (rel or "").replace("\\", "/").strip("/")
     safe = os.path.normpath(rel).lstrip("/\\")
     full = os.path.abspath(os.path.join(base_dir, safe))
-    if not full.startswith(os.path.abspath(base_dir)):
+    base_abs = os.path.abspath(base_dir)
+    try:
+        if os.path.commonpath([base_abs, full]) != base_abs:
+            return None
+    except ValueError:
         return None
     return full
 
 
-def pick_folder_dialog():
+def get_host_drives():
+    """
+    Enumerate all logical storage drives on the host PC with capacity and free space.
+    On Windows: queries C:\\, D:\\, etc. via kernel32 GetLogicalDrives.
+    On Unix/macOS: queries root (/), /Volumes, /media, /mnt, and user home.
+    """
+    drives = []
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for letter in string.ascii_uppercase:
+                if bitmask & 1:
+                    drive_path = f"{letter}:\\"
+                    try:
+                        u = shutil.disk_usage(drive_path)
+                        drives.append({
+                            "path": drive_path,
+                            "name": f"Local Disk ({letter}:)",
+                            "letter": letter,
+                            "free_gb": f"{u.free / (1024**3):.1f}",
+                            "total_gb": f"{u.total / (1024**3):.1f}",
+                            "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                            "is_system": letter.upper() == "C"
+                        })
+                    except Exception:
+                        drives.append({
+                            "path": drive_path,
+                            "name": f"Drive ({letter}:)",
+                            "letter": letter,
+                            "free_gb": "?",
+                            "total_gb": "?",
+                            "used_pct": 0,
+                            "is_system": letter.upper() == "C"
+                        })
+                bitmask >>= 1
+        except Exception:
+            for letter in string.ascii_uppercase:
+                drive_path = f"{letter}:\\"
+                if os.path.exists(drive_path):
+                    try:
+                        u = shutil.disk_usage(drive_path)
+                        drives.append({
+                            "path": drive_path,
+                            "name": f"Drive ({letter}:)",
+                            "letter": letter,
+                            "free_gb": f"{u.free / (1024**3):.1f}",
+                            "total_gb": f"{u.total / (1024**3):.1f}",
+                            "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                            "is_system": letter.upper() == "C"
+                        })
+                    except Exception:
+                        pass
+    else:
+        root_candidates = ["/", os.path.expanduser("~")]
+        for p in ["/Volumes", "/media", "/mnt"]:
+            if os.path.exists(p):
+                try:
+                    for sub in os.listdir(p):
+                        sp = os.path.join(p, sub)
+                        if os.path.isdir(sp):
+                            root_candidates.append(sp)
+                except Exception:
+                    pass
+        for p in root_candidates:
+            if os.path.exists(p):
+                try:
+                    u = shutil.disk_usage(p)
+                    drives.append({
+                        "path": p,
+                        "name": os.path.basename(p) or "Root (/)",
+                        "letter": "/",
+                        "free_gb": f"{u.free / (1024**3):.1f}",
+                        "total_gb": f"{u.total / (1024**3):.1f}",
+                        "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
+                        "is_system": p == "/"
+                    })
+                except Exception:
+                    pass
+    return drives
+
+
+def browse_host_directory(path=""):
+    """
+    Traverse the host filesystem safely, filtering protected directories
+    and returning breadcrumbs, subdirectories, disk space, and drives list.
+    """
+    path = (path or "").strip().strip("'\"")
+    drives = get_host_drives()
+
+    if not path or path.lower() in ("roots", "drives", "root"):
+        return {
+            "is_root": True,
+            "current_path": "",
+            "parent_path": "",
+            "drives": drives,
+            "subdirs": []
+        }
+
+    target = os.path.abspath(path)
+    if not os.path.exists(target) or not os.path.isdir(target):
+        if drives:
+            first_drive = next((d['path'] for d in drives if d['path'].upper().startswith('D')), drives[0]['path'])
+            if os.path.isdir(first_drive):
+                return browse_host_directory(first_drive)
+        return {
+            "is_root": True,
+            "current_path": "",
+            "parent_path": "",
+            "drives": drives,
+            "subdirs": []
+        }
+
+    parent = os.path.dirname(target)
+    if parent == target:
+        parent = ""  # Reached top-level drive root
+
+    subdirs = []
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.wm_attributes("-topmost", 1)
-        path = filedialog.askdirectory(title="Select folder to share on TurboShare")
-        root.destroy()
-        return path or None
-    except Exception:
-        return None
+        with os.scandir(target) as it:
+            for entry in it:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        name = entry.name
+                        # Filter system-protected / reserved Windows folders
+                        if name.startswith("$") or name in (
+                            "System Volume Information", "Recovery", "$WinREAgent",
+                            "Config.Msi", "MSOCache", "hiberfil.sys", "pagefile.sys"
+                        ):
+                            continue
+                        subdirs.append({
+                            "name": name,
+                            "path": entry.path,
+                            "isDir": True
+                        })
+                except (PermissionError, OSError):
+                    continue
+    except PermissionError:
+        return {
+            "is_root": False,
+            "error": "Permission denied accessing folder",
+            "current_path": target,
+            "parent_path": parent,
+            "drives": drives,
+            "subdirs": []
+        }
+    except Exception as e:
+        return {
+            "is_root": False,
+            "error": str(e),
+            "current_path": target,
+            "parent_path": parent,
+            "drives": drives,
+            "subdirs": []
+        }
+
+    subdirs.sort(key=lambda x: x["name"].lower())
+    d_info = disk_info(target)
+
+    return {
+        "is_root": False,
+        "current_path": target,
+        "parent_path": parent,
+        "disk": d_info,
+        "drives": drives,
+        "subdirs": subdirs
+    }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HIGH-CRAFT UI TEMPLATE (Linear / Raycast Dark Precision)
-# ═══════════════════════════════════════════════════════════════════════════════
-def render_page(port):
-    ifaces = get_network_interfaces()
-    recv_di = disk_info(UPLOAD_DIR)
-    share_di = disk_info(HOST_SHARE) if HOST_SHARE else {}
+def pick_folder_powershell(timeout_sec=120):
+    """
+    Launch native Windows FolderBrowserDialog via PowerShell STA mode with topmost form focus.
+    Guarantees non-blocking execution in server threads and proper foreground window activation.
+    """
+    if sys.platform != "win32":
+        return None, "unsupported_platform"
+
+    ps_script = (
+        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;"
+        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$dialog.Description = 'Select folder for TurboShare File Transfer Hub';"
+        "$dialog.ShowNewFolderButton = $true;"
+        "$topForm = New-Object System.Windows.Forms.Form;"
+        "$topForm.TopMost = $true;"
+        "$topForm.Width = 0;"
+        "$topForm.Height = 0;"
+        "$topForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen;"
+        "$result = $dialog.ShowDialog($topForm);"
+        "$topForm.Dispose();"
+        "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath } else { Write-Output '' }"
+    )
+
+    cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        selected = proc.stdout.strip()
+        if selected and os.path.isdir(selected):
+            return selected, None
+        return None, "cancelled"
+    except subprocess.TimeoutExpired:
+        return None, "dialog_timeout"
+    except Exception as e:
+        # Fallback to Tkinter if PowerShell fails
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.wm_attributes("-topmost", 1)
+            path = filedialog.askdirectory(title="Select folder for TurboShare")
+            root.destroy()
+            if path and os.path.isdir(path):
+                return path, None
+            return None, "cancelled"
+        except Exception:
+            return None, str(e)
+
+
+def open_in_os_explorer(target_dir, client_ip):
+    """
+    Spawn the host OS file explorer (explorer.exe / open / xdg-open) in the foreground.
+    Differentiates between localhost and remote clients.
+    """
+    is_local = client_ip in get_local_ip_set()
     
-    recv_path_esc = html.escape(UPLOAD_DIR)
-    share_path_esc = html.escape(HOST_SHARE) if HOST_SHARE else "No folder selected"
+    if not target_dir or not os.path.exists(target_dir):
+        return {
+            "success": False,
+            "status": "error",
+            "error": "directory_not_found",
+            "is_local": is_local,
+            "is_local_client": is_local,
+            "message": "Directory not found on host PC"
+        }
 
-    # Pre-render network interface items
-    net_items = []
-    qr_options = []
-    for i in ifaces:
-        url = f"http://{i['ip']}:{port}"
-        net_items.append(f"""
-        <div class="net-item" onclick="copyAddress('{url}')" title="Click to copy address">
-          <div class="net-item-header">
-            <span class="net-badge {i['kind']}">{i['label']}</span>
-            <button class="icon-btn-micro" onclick="event.stopPropagation(); showQRModal('{url}', '{i['label']}')" title="Show QR Code">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></svg>
-            </button>
-          </div>
-          <div class="net-item-url">{url}</div>
-        </div>
-        """)
-        qr_options.append(f"""
-        <button class="btn btn-ghost btn-sm" onclick="showQRModal('{url}', '{i['label']}')">
-          {i['label']}
-        </button>
-        """)
+    norm = os.path.normpath(target_dir)
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer.exe", norm])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", norm])
+        else:
+            subprocess.Popen(["xdg-open", norm])
 
-    net_items_html = "\n".join(net_items)
-    qr_options_html = "\n".join(qr_options)
+        msg = "Opened folder in Windows Explorer" if is_local else "Folder opened on Host PC display (viewing in browser)"
+        return {
+            "success": True,
+            "status": "ok",
+            "is_local": is_local,
+            "is_local_client": is_local,
+            "path": norm,
+            "message": msg
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "status": "error",
+            "error": str(e),
+            "is_local": is_local,
+            "is_local_client": is_local,
+            "message": f"Could not launch OS explorer: {e}"
+        }
 
-    return f"""<!DOCTYPE html>
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HIGH-CRAFT UI TEMPLATE (Linear / Raycast / Claude Obsidian Dark Edition)
+# ═══════════════════════════════════════════════════════════════════════════════
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
-<title>TurboShare &mdash; LAN Transfer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
+<title>TurboShare &mdash; High-Speed LAN Transfer Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-/* ── Reset & Raycast/Linear Design Tokens ──────────────────────────────────── */
-*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+/* ═══════════════════════════════════════════════════════════════════════════════
+   DESIGN TOKENS & SURFACE HIERARCHY (Linear / Raycast / Claude Obsidian Theme)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {{
+:root {
+  /* Surface Ladder */
   --canvas: #090a0c;
   --surface-1: #111215;
   --surface-2: #16171b;
   --surface-3: #1c1d22;
-  --surface-hover: #22232a;
-  
+  --surface-4: #22232a;
+  --surface-hover: #1f2027;
+  --surface-overlay: rgba(9, 10, 12, 0.85);
+
+  /* Hairlines & Borders */
   --border-subtle: rgba(255, 255, 255, 0.05);
-  --border-standard: rgba(255, 255, 255, 0.08);
-  --border-focus: rgba(255, 255, 255, 0.20);
-  
+  --border-standard: rgba(255, 255, 255, 0.09);
+  --border-hover: rgba(255, 255, 255, 0.18);
+  --border-focus: rgba(255, 255, 255, 0.35);
+  --border-accent: rgba(79, 127, 255, 0.50);
+
+  /* WCAG AA High Contrast Typography */
   --text-primary: #ededed;
   --text-secondary: #9ca0a8;
-  --text-tertiary: #5c6068;
-  
+  --text-tertiary: #8e929b;
+  --text-disabled: #4a4d56;
+  --text-inverse: #090a0c;
+
+  /* Accent & Semantic Palette */
   --accent: #ededed;
-  --accent-fg: #090a0c;
   --brand-blue: #4f7fff;
-  --status-green: #10b981;
-  --status-green-glow: rgba(16, 185, 129, 0.15);
+  --brand-blue-glow: rgba(79, 127, 255, 0.25);
+  --status-success: #10b981;
+  --status-success-bg: rgba(16, 185, 129, 0.12);
+  --status-warning: #f59e0b;
+  --status-warning-bg: rgba(245, 158, 11, 0.12);
+  --status-error: #ef4444;
+  --status-error-bg: rgba(239, 68, 68, 0.12);
+  --status-info: #38bdf8;
+  --status-info-bg: rgba(56, 189, 248, 0.12);
+
+  /* Network Badges */
+  --net-wifi-fg: #60a5fa;
+  --net-wifi-bg: rgba(96, 165, 250, 0.10);
+  --net-wifi-border: rgba(96, 165, 250, 0.25);
   
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
-  
+  --net-hotspot-fg: #fbbf24;
+  --net-hotspot-bg: rgba(251, 191, 36, 0.10);
+  --net-hotspot-border: rgba(251, 191, 36, 0.25);
+
+  --net-ethernet-fg: #34d399;
+  --net-ethernet-bg: rgba(52, 211, 153, 0.10);
+  --net-ethernet-border: rgba(52, 211, 153, 0.25);
+
+  --net-p2p-fg: #2dd4bf;
+  --net-p2p-bg: rgba(45, 212, 191, 0.12);
+  --net-p2p-border: rgba(45, 212, 191, 0.30);
+
+  /* Typography Stacks */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* Spatial & Elevation */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
-}}
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
 
-body {{
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-raised: 0 4px 16px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 20px 50px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --shadow-accent-glow: 0 0 30px rgba(79, 127, 255, 0.25);
+}
+
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
   background-color: var(--canvas);
   color: var(--text-primary);
   font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   min-height: 100dvh;
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
   display: flex;
   flex-direction: column;
-}}
+}
 
-/* ── Typography & Components ──────────────────────────────────────────────── */
-h1, h2, h3, h4 {{ font-weight: 500; letter-spacing: -0.015em; color: var(--text-primary); }}
-code, .mono {{ font-family: var(--font-mono); font-size: 12px; }}
+/* Tabular Numerics for Zero-Jitter UI */
+.tabular-nums, .mono, .ts-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
 
-.app-header {{
-  background: var(--canvas);
+/* Universal SVG Icon Style */
+.icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.75;
+  stroke: currentColor;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HEADER & BRANDING
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.header {
+  background: var(--surface-1);
   border-bottom: 1px solid var(--border-standard);
   position: sticky;
   top: 0;
   z-index: 100;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-}}
+  overflow: hidden;
+  max-width: 100%;
+}
 
-.header-inner {{
-  max-width: 1200px;
+.header-inner {
+  max-width: 1320px;
   margin: 0 auto;
   padding: 12px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-}}
+}
 
-.brand-wrap {{
+.brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-}}
+  gap: 10px;
+  user-select: none;
+}
 
-.logo-badge {{
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  border: 1px solid var(--border-standard);
+.brand-icon {
+  width: 32px;
+  height: 32px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-primary);
-}}
+  color: var(--brand-blue);
+  box-shadow: 0 2px 8px rgba(79, 127, 255, 0.2);
+}
+.brand-icon svg { width: 18px; height: 18px; }
 
-.brand-name {{
-  font-size: 14px;
+.brand-title {
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.02em;
-}}
-
-.status-badge {{
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--status-green);
-  background: var(--status-green-glow);
-  padding: 2px 8px;
-  border-radius: 9999px;
-  border: 1px solid rgba(16, 185, 129, 0.2);
-}}
-
-.status-dot {{
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--status-green);
-  box-shadow: 0 0 6px var(--status-green);
-}}
-
-.header-actions {{
+  color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: 8px;
-}}
+}
 
-/* ── Buttons ──────────────────────────────────────────────────────────────── */
-.btn {{
+.status-pill {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--status-success);
+  background: var(--status-success-bg);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: var(--radius-pill);
+  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--status-success);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--status-success);
+  animation: pulseDot 2s infinite ease-in-out;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   NETWORK LINKS RIBBON (Horizontal Wheel Scroll, Touch Gestures, Grid Toggle)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.network-bar {
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-subtle);
+  position: relative;
+}
+
+.network-bar-inner {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.net-scroll-wrapper {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+}
+
+.net-scroll-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-hover) transparent;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x mandatory;
+  width: 100%;
+  padding: 4px 2px;
+}
+.net-scroll-container::-webkit-scrollbar { height: 4px; }
+.net-scroll-container::-webkit-scrollbar-track { background: transparent; }
+.net-scroll-container::-webkit-scrollbar-thumb { background: var(--border-hover); border-radius: 9999px; }
+
+.net-scroll-container.grid-mode {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  overflow-x: visible;
+}
+
+.net-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  min-width: 220px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  flex-shrink: 0;
+  user-select: none;
+  position: relative;
+  scroll-snap-align: start;
+}
+.net-item:hover {
+  background: var(--surface-3);
+  border-color: var(--border-focus);
+  transform: translateY(-1px);
+}
+.net-item:active {
+  transform: scale(0.98);
+}
+
+.net-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.net-kind-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+}
+.net-kind-badge.wifi { color: var(--net-wifi-fg); background: var(--net-wifi-bg); border: 1px solid var(--net-wifi-border); }
+.net-kind-badge.hotspot { color: var(--net-hotspot-fg); background: var(--net-hotspot-bg); border: 1px solid var(--net-hotspot-border); }
+.net-kind-badge.ethernet-direct { color: var(--net-p2p-fg); background: var(--net-p2p-bg); border: 1px solid var(--net-p2p-border); }
+.net-kind-badge.ethernet { color: var(--net-ethernet-fg); background: var(--net-ethernet-bg); border: 1px solid var(--net-ethernet-border); }
+.net-kind-badge.virtual { color: #a78bfa; background: rgba(167, 139, 250, 0.1); border: 1px solid rgba(167, 139, 250, 0.25); }
+.net-kind-badge.bluetooth { color: #818cf8; background: rgba(129, 140, 248, 0.1); border: 1px solid rgba(129, 140, 248, 0.25); }
+.net-kind-badge.lan { color: var(--text-secondary); background: var(--surface-3); border: 1px solid var(--border-standard); }
+
+.net-item-url {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.net-item-desc {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.net-copied-badge {
+  position: absolute;
+  inset: 0;
+  background: rgba(16, 185, 129, 0.92);
+  color: #ffffff;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.net-item.copied .net-copied-badge {
+  opacity: 1;
+}
+.net-copied-badge svg { width: 14px; height: 14px; stroke: #fff; }
+
+.scroll-chevron {
+  width: 28px;
+  height: 28px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.scroll-chevron:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   BUTTONS & FORM CONTROLS
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  border: 1px solid transparent;
-  white-space: nowrap;
-  text-decoration: none;
-}}
-
-.btn-primary {{
-  background: var(--accent);
-  color: var(--accent-fg);
-}}
-.btn-primary:hover {{
-  background: #ffffff;
-}}
-
-.btn-ghost {{
-  background: transparent;
-  color: var(--text-secondary);
-  border-color: var(--border-standard);
-}}
-.btn-ghost:hover {{
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-standard);
   background: var(--surface-2);
   color: var(--text-primary);
-  border-color: var(--border-focus);
-}}
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+  white-space: nowrap;
+  min-height: 32px;
+  text-decoration: none;
+}
+.btn:hover {
+  background: var(--surface-3);
+  border-color: var(--border-hover);
+  color: #fff;
+}
+.btn:active {
+  transform: scale(0.97);
+}
 
-.btn-sm {{
-  height: 28px;
-  padding: 0 10px;
+.btn-primary {
+  background: var(--text-primary);
+  color: var(--text-inverse);
+  border-color: transparent;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  background: #ffffff;
+  color: var(--text-inverse);
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.2);
+}
+
+.btn-brand {
+  background: var(--brand-blue);
+  color: #ffffff;
+  border-color: transparent;
+}
+.btn-brand:hover {
+  background: #3b6ae6;
+  box-shadow: 0 0 16px var(--brand-blue-glow);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.btn-ghost:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+.btn-sm {
+  padding: 4px 8px;
   font-size: 11px;
-}}
+  min-height: 28px;
+}
 
-.icon-btn {{
+.icon-btn {
   width: 32px;
   height: 32px;
   padding: 0;
@@ -337,1198 +887,2120 @@ code, .mono {{ font-family: var(--font-mono); font-size: 12px; }}
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-sm);
-  background: transparent;
   border: 1px solid var(--border-standard);
+  background: var(--surface-2);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all 0.15s ease;
-}}
-.icon-btn:hover {{
-  background: var(--surface-2);
+  transition: all 0.15s;
+}
+.icon-btn:hover {
+  background: var(--surface-3);
   color: var(--text-primary);
-  border-color: var(--border-focus);
-}}
-
-.icon-btn-micro {{
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  background: transparent;
-  border: none;
-  color: var(--text-tertiary);
+  border-color: var(--border-hover);
+}
+.icon-btn-micro {
+  width: 24px;
+  height: 24px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
-}}
-.icon-btn-micro:hover {{
-  color: var(--text-primary);
-  background: var(--surface-3);
-}}
-
-/* ── Network Sub-Bar ──────────────────────────────────────────────────────── */
-.network-bar {{
-  background: var(--surface-1);
-  border-bottom: 1px solid var(--border-subtle);
-  padding: 10px 0;
-}}
-
-.network-bar-inner {{
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 24px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  overflow-x: auto;
-}}
-
-.net-list {{
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}}
-
-.net-item {{
-  background: var(--surface-2);
-  border: 1px solid var(--border-standard);
-  border-radius: var(--radius-sm);
-  padding: 6px 10px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 160px;
-}}
-.net-item:hover {{
-  border-color: var(--border-focus);
-  background: var(--surface-3);
-}}
-
-.net-item-header {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}}
-
-.net-badge {{
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-tertiary);
-}}
-.net-badge.wifi {{ color: #60a5fa; }}
-.net-badge.hotspot {{ color: #fbbf24; }}
-.net-badge.ethernet-direct, .net-badge.ethernet {{ color: #34d399; }}
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.icon-btn-micro:hover {
+  background: var(--surface-4);
+  color: var(--text-primary);
+  border-color: var(--border-standard);
+}
 
-.net-item-url {{
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-}}
-
-/* ── Main Layout ──────────────────────────────────────────────────────────── */
-.app-container {{
-  max-width: 1200px;
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MAIN APP WORKBENCH LAYOUT (Desktop 2-Col -> Mobile 1-Col)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.app-container {
+  max-width: 1320px;
   width: 100%;
   margin: 0 auto;
-  padding: 24px;
-  flex: 1;
+  padding: clamp(12px, 2.5vw, 24px);
   display: grid;
   grid-template-columns: 360px 1fr;
-  gap: 24px;
-  align-items: start;
-}}
+  gap: 20px;
+  flex: 1;
+}
 
-@media (max-width: 860px) {{
-  .app-container {{
-    grid-template-columns: 1fr;
-  }}
-}}
-
-/* ── Sidebar Cards ────────────────────────────────────────────────────────── */
-.sidebar {{
+.sidebar {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}}
+  gap: 16px;
+}
 
-.panel-card {{
+.main-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* Cards & Containers */
+.card {
   background: var(--surface-1);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-lg);
-  overflow: hidden;
-}}
-
-.panel-card-head {{
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}}
-
-.panel-card-title {{
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}}
-
-.panel-card-body {{
   padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-}}
+  gap: 12px;
+  box-shadow: var(--shadow-panel);
+}
 
-/* Path Display Box */
-.path-display {{
-  background: var(--surface-2);
-  border: 1px solid var(--border-standard);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
+.card-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-}}
+}
 
-.path-text {{
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.card-subtitle {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* Storage Target Display */
+.target-box {
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.target-path-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.target-path {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-primary);
   word-break: break-all;
+  line-height: 1.4;
+}
+
+/* Storage Progress Bar */
+.storage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.storage-meter-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.storage-track {
+  height: 4px;
+  background: var(--surface-4);
+  border-radius: 9999px;
   overflow: hidden;
-  text-overflow: ellipsis;
-}}
+  position: relative;
+}
 
-.path-text.empty {{
-  color: var(--text-tertiary);
-  font-style: italic;
-}}
+.storage-fill {
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--status-success);
+  transition: width 0.3s ease;
+}
+.storage-fill.warn { background: var(--status-warning); }
+.storage-fill.danger { background: var(--status-error); }
 
-/* Dropzone */
-.dropzone {{
+.card-button-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   DROPZONE & UPLOAD CONTROLS
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.dropzone {
   background: var(--surface-2);
-  border: 1px dashed var(--border-standard);
-  border-radius: var(--radius-md);
-  padding: 24px 16px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
+  border: 2px dashed var(--border-standard);
+  border-radius: var(--radius-lg);
+  padding: 28px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  text-align: center;
   gap: 10px;
-}}
-.dropzone:hover, .dropzone.active {{
-  border-color: var(--border-focus);
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+}
+.dropzone:hover, .dropzone.dragover {
+  border-color: var(--brand-blue);
+  background: rgba(79, 127, 255, 0.05);
+  box-shadow: var(--shadow-accent-glow);
+}
+
+.dropzone-icon {
+  width: 44px;
+  height: 44px;
   background: var(--surface-3);
-}}
-
-.dropzone-icon {{
-  color: var(--text-secondary);
-}}
-
-.dropzone-title {{
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-}}
-
-.dropzone-sub {{
-  font-size: 11px;
-  color: var(--text-tertiary);
-  max-width: 240px;
-  line-height: 1.4;
-}}
-
-.dropzone-actions {{
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
-}}
+  align-items: center;
+  justify-content: center;
+  color: var(--brand-blue);
+}
+.dropzone-icon svg { width: 22px; height: 22px; }
 
-/* Disk gauge */
-.disk-meter {{
+.dropzone-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.dropzone-desc {
   font-size: 11px;
   color: var(--text-tertiary);
+  max-width: 220px;
+  line-height: 1.4;
+}
+
+.upload-actions-mobile {
+  display: none;
+  gap: 8px;
+  width: 100%;
+}
+
+/* Active Transfer Monitor Card */
+.transfer-card {
+  display: none;
+  background: var(--surface-2);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  flex-direction: column;
+  gap: 8px;
+  animation: slideDown 0.2s ease;
+}
+.transfer-card.active { display: flex; }
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.transfer-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-}}
+  gap: 8px;
+}
 
-/* ── Explorer View ────────────────────────────────────────────────────────── */
-.explorer-card {{
+.transfer-file-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.transfer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.progress-track {
+  height: 6px;
+  background: var(--surface-4);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--brand-blue);
+  border-radius: 9999px;
+  width: 0%;
+  transition: width 0.15s linear;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   FILE EXPLORER CARD (Dual Tabs, Search Bar, Table & Density)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.explorer-card {
   background: var(--surface-1);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-lg);
-  overflow: hidden;
   display: flex;
   flex-direction: column;
-  min-height: 540px;
-}}
+  flex: 1;
+  min-height: 480px;
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
 
-/* Explorer Tabs */
-.explorer-tabs {{
-  display: flex;
+.explorer-header {
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border-standard);
-  padding: 0 16px;
-  background: var(--surface-1);
-}}
-
-.explorer-tab {{
-  padding: 12px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: all 0.15s ease;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}}
-.explorer-tab:hover {{
-  color: var(--text-primary);
-}}
-.explorer-tab.active {{
-  color: var(--text-primary);
-  border-bottom-color: var(--accent);
-}}
-
-.tab-badge {{
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 9999px;
-  background: var(--surface-3);
-  color: var(--text-secondary);
-}}
-.explorer-tab.active .tab-badge {{
-  background: var(--surface-hover);
-  color: var(--text-primary);
-}}
-
-/* Explorer Toolbar */
-.explorer-toolbar {{
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-}}
+}
 
-.breadcrumbs {{
+.explorer-tabs {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}}
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+}
 
-.bc-link {{
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: var(--radius-xs);
+  border: none;
+  background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-}}
-.bc-link:hover {{
+  transition: all 0.12s ease;
+  user-select: none;
+}
+.tab-btn:hover {
   color: var(--text-primary);
-  text-decoration: underline;
-}}
+}
+.tab-btn.active {
+  background: var(--surface-4);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
 
-.toolbar-actions {{
+.tab-badge {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--surface-3);
+  color: var(--text-tertiary);
+  padding: 1px 5px;
+  border-radius: var(--radius-pill);
+}
+.tab-btn.active .tab-badge {
+  background: var(--surface-1);
+  color: var(--text-primary);
+}
+
+.explorer-toolbar {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.search-box {
   display: flex;
   align-items: center;
   gap: 8px;
-}}
-
-/* Data Table */
-.table-container {{
+  background: var(--surface-1);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
   flex: 1;
-  overflow-x: auto;
-}}
+  max-width: 320px;
+  min-width: 180px;
+  transition: border-color 0.15s;
+}
+.search-box:focus-within {
+  border-color: var(--border-focus);
+}
+.search-box svg {
+  color: var(--text-tertiary);
+  width: 14px;
+  height: 14px;
+}
+.search-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  width: 100%;
+}
+.search-input::placeholder {
+  color: var(--text-tertiary);
+}
 
-table {{
+.explorer-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+.crumb-item {
+  cursor: pointer;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: var(--radius-xs);
+}
+.crumb-item:hover {
+  color: var(--text-primary);
+  background: var(--surface-3);
+}
+.crumb-sep {
+  color: var(--text-tertiary);
+}
+
+/* Table Styles */
+.table-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+}
+
+.file-table {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
-}}
+  font-size: 12px;
+}
 
-th {{
-  padding: 10px 16px;
+.file-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-1);
+  padding: 8px 16px;
   font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  font-weight: 600;
   color: var(--text-tertiary);
-  border-bottom: 1px solid var(--border-subtle);
-}}
+  border-bottom: 1px solid var(--border-standard);
+  user-select: none;
+  z-index: 10;
+}
 
-td {{
+.file-table td {
   padding: 10px 16px;
-  font-size: 13px;
   border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-primary);
-}}
+  color: var(--text-secondary);
+  vertical-align: middle;
+}
 
-tr:hover td {{
-  background: var(--surface-2);
-}}
+.file-table tr.file-row {
+  transition: background 0.1s ease;
+  cursor: pointer;
+}
+.file-table tr.file-row:hover {
+  background: var(--surface-hover);
+}
 
-.row-item {{
+.file-name-cell {
   display: flex;
   align-items: center;
   gap: 10px;
-  cursor: pointer;
   color: var(--text-primary);
-  text-decoration: none;
-}}
-.row-item:hover {{
-  color: #fff;
-}}
-
-.row-icon {{
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-}}
-.row-item:hover .row-icon {{
-  color: var(--text-primary);
-}}
-
-.size-col {{
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-secondary);
-}}
-
-.acts-col {{
-  text-align: right;
-}}
-
-.empty-state {{
-  text-align: center;
-  padding: 64px 24px;
-  color: var(--text-tertiary);
-}}
-
-/* ── Transfer Sheet / Progress ────────────────────────────────────────────── */
-.transfer-sheet {{
-  position: fixed;
-  bottom: 20px;
-  right: 24px;
-  width: 380px;
-  background: var(--surface-1);
-  border: 1px solid var(--border-standard);
-  border-radius: var(--radius-lg);
-  padding: 16px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
-  z-index: 150;
-  display: none;
-}}
-.transfer-sheet.active {{ display: block; }}
-
-.ts-header {{
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}}
-.ts-title {{
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-secondary);
-}}
-.ts-speed {{
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--status-green);
   font-weight: 500;
-}}
+  min-width: 180px;
+}
 
-.ts-filename {{
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-primary);
-  margin-bottom: 8px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}}
-
-.progress-track {{
-  height: 4px;
+.file-icon-box {
+  width: 28px;
+  height: 28px;
   background: var(--surface-3);
-  border-radius: 9999px;
-  overflow: hidden;
-  margin-bottom: 8px;
-}}
-.progress-fill {{
-  height: 100%;
-  width: 0%;
-  background: var(--accent);
-  transition: width 0.1s linear;
-}}
-
-.ts-meta {{
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-xs);
   display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-}}
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.file-icon-box.folder { color: #fbbf24; }
+.file-icon-box.image { color: #38bdf8; }
+.file-icon-box.video { color: #f43f5e; }
+.file-icon-box.audio { color: #a855f7; }
+.file-icon-box.code { color: #34d399; }
+.file-icon-box.zip { color: #fb923c; }
 
-/* ── Modals ───────────────────────────────────────────────────────────────── */
-.modal-overlay {{
+.file-actions-cell {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.empty-state {
+  padding: 48px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 12px;
+  color: var(--text-tertiary);
+}
+.empty-icon {
+  width: 48px;
+  height: 48px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+}
+.empty-icon svg { width: 24px; height: 24px; }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   FULL-WINDOW DRAG-AND-DROP OVERLAY
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.window-drop-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  z-index: 200;
+  background: var(--surface-overlay);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 999;
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-}}
-.modal-overlay.open {{ display: flex; }}
+  padding: 32px;
+  pointer-events: none;
+}
+.window-drop-overlay.active {
+  display: flex;
+  pointer-events: auto;
+}
 
-.modal-content {{
+.window-drop-box {
+  background: var(--surface-1);
+  border: 2px dashed var(--brand-blue);
+  border-radius: var(--radius-lg);
+  padding: 48px;
+  text-align: center;
+  max-width: 520px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  box-shadow: var(--shadow-accent-glow), var(--shadow-modal);
+  animation: dropCardEnter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dropCardEnter {
+  from { opacity: 0; transform: scale(0.94) translateY(12px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MODAL DIALOGS & MOBILE BOTTOM SHEETS
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--surface-overlay);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.2s;
+}
+.modal-overlay.open {
+  opacity: 1;
+  visibility: visible;
+}
+
+.modal-content {
   background: var(--surface-1);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
   width: 100%;
-  max-width: 480px;
-  padding: 24px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
-}}
+  max-width: 580px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  transform: scale(0.96) translateY(8px);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  overflow: hidden;
+}
+.modal-overlay.open .modal-content {
+  transform: scale(1) translateY(0);
+}
 
-.modal-header {{
+.modal-header {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-standard);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
-}}
-.modal-title {{
-  font-size: 15px;
+  gap: 12px;
+}
+.modal-title {
+  font-size: 14px;
   font-weight: 600;
-}}
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
-.input-text {{
-  width: 100%;
-  height: 36px;
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--border-standard);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* In-Browser Host Folder Navigator Modal Specifics */
+.drives-chip-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.drive-chip {
   background: var(--surface-2);
   border: 1px solid var(--border-standard);
   border-radius: var(--radius-sm);
-  padding: 0 12px;
-  font-family: var(--font-mono);
+  padding: 6px 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.12s ease;
+  white-space: nowrap;
+}
+.drive-chip:hover, .drive-chip.active {
+  background: var(--surface-3);
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+.drive-chip svg { width: 14px; height: 14px; color: var(--brand-blue); }
+
+.folder-tree-list {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.folder-tree-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
   font-size: 12px;
   color: var(--text-primary);
-  outline: none;
-  margin-top: 8px;
-}}
-.input-text:focus {{
-  border-color: var(--border-focus);
-}}
+  transition: background 0.1s ease;
+}
+.folder-tree-item:last-child { border-bottom: none; }
+.folder-tree-item:hover {
+  background: var(--surface-3);
+}
+.folder-tree-item.parent-dir {
+  color: var(--text-secondary);
+}
 
-/* ── Toast ────────────────────────────────────────────────────────────────── */
-.toast {{
+/* ═══════════════════════════════════════════════════════════════════════════════
+   TOAST NOTIFICATION SYSTEM
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.toast-container {
   position: fixed;
   bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%) translateY(40px);
-  opacity: 0;
-  background: var(--surface-2);
-  color: var(--text-primary);
-  border: 1px solid var(--border-standard);
-  padding: 8px 16px;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   pointer-events: none;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  z-index: 300;
-}}
-.toast.show {{
+  max-width: 380px;
+  width: calc(100% - 48px);
+}
+
+.toast-item {
+  background: var(--surface-1);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  box-shadow: var(--shadow-modal);
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(16px) scale(0.96);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.toast-item.show {
   opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}}
+  transform: translateY(0) scale(1);
+}
+
+.toast-success { border-color: rgba(16, 185, 129, 0.4); }
+.toast-success .toast-icon { color: var(--status-success); }
+
+.toast-error { border-color: rgba(239, 68, 68, 0.4); }
+.toast-error .toast-icon { color: var(--status-error); }
+
+.toast-info { border-color: rgba(56, 189, 248, 0.4); }
+.toast-info .toast-icon { color: var(--status-info); }
+
+.toast-content { flex: 1; min-width: 0; }
+.toast-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.toast-desc { font-size: 11px; color: var(--text-secondary); margin-top: 2px; line-height: 1.4; }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   RESPONSIVE BREAKPOINTS: TABLET (< 860px), MOBILE (< 600px), COMPACT (< 480px), ULTRA-COMPACT (< 360px)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .app-container {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 12px;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  .header-inner {
+    padding: 10px 16px;
+  }
+
+  .btn, .icon-btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .tab-btn {
+    min-height: 40px;
+    padding: 0 14px;
+  }
+
+  .upload-actions-mobile {
+    display: flex;
+  }
+
+  .dropzone-desc {
+    display: none;
+  }
+
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal-content {
+    max-width: 100%;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: none;
+    max-height: 90dvh;
+    transform: translateY(100%);
+  }
+  .modal-overlay.open .modal-content {
+    transform: translateY(0);
+  }
+
+  .toast-container {
+    bottom: 16px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 600px) {
+  html, body {
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+  .header-inner {
+    padding: 8px 12px;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 8px;
+    max-width: 100%;
+  }
+  .status-pill {
+    display: none;
+  }
+  .header-actions {
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .network-bar-inner {
+    padding: 6px 12px;
+    max-width: 100%;
+  }
+  .net-item {
+    min-width: 180px;
+  }
+  .net-scroll-container.grid-mode {
+    grid-template-columns: 1fr;
+  }
+  .explorer-header {
+    padding: 10px 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .explorer-tabs {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .tab-btn {
+    justify-content: center;
+  }
+  .explorer-toolbar {
+    padding: 8px 12px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .search-box {
+    max-width: 100%;
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-container {
+    padding: 10px 8px;
+    gap: 12px;
+  }
+  .card {
+    padding: 12px 10px;
+  }
+  .header-inner {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  .brand-title {
+    font-size: 14px;
+  }
+  .brand-icon {
+    width: 28px;
+    height: 28px;
+  }
+  .brand-icon svg {
+    width: 16px;
+    height: 16px;
+  }
+  
+  /* Collapse text labels in header action buttons to icons only */
+  .header-actions .btn .btn-label,
+  .header-actions .btn-label,
+  .header-actions .btn-text {
+    display: none;
+  }
+  .header-actions .btn {
+    padding: 0;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  .header-actions .btn svg {
+    margin: 0;
+  }
+  .header-actions {
+    gap: 4px;
+  }
+
+  /* Hide scroll chevrons on mobile in favor of touch-drag swipe */
+  .network-bar-inner {
+    padding: 6px 8px;
+    gap: 6px;
+  }
+  .scroll-chevron {
+    display: none !important;
+  }
+  .net-item {
+    min-width: 160px;
+    padding: 6px 10px;
+  }
+  .net-item-url {
+    font-size: 11px;
+  }
+  .net-scroll-container.grid-mode .net-item {
+    min-width: 0;
+    width: 100%;
+  }
+
+  /* Responsive Card Buttons */
+  .card-button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+  }
+  .card-button-row .btn {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+    min-height: 44px;
+    font-size: 11px;
+    padding: 6px 4px;
+    justify-content: center;
+    text-align: center;
+  }
+
+  /* File Explorer Responsiveness */
+  .explorer-header .header-actions {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+  }
+  .explorer-header .header-actions .btn {
+    flex: 1;
+    min-height: 44px;
+  }
+  .table-wrapper {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .file-table {
+    min-width: 280px;
+    font-size: 11px;
+  }
+  .file-table th, .file-table td {
+    padding: 6px 8px;
+  }
+  .file-name-cell {
+    min-width: 0;
+    max-width: 140px;
+    gap: 6px;
+  }
+  .file-name-cell span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-icon-box {
+    width: 24px;
+    height: 24px;
+  }
+  .file-icon-box svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  /* Modal Responsiveness */
+  .modal-header {
+    padding: 10px 14px;
+  }
+  .modal-body {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+  .modal-footer {
+    padding: 10px 14px;
+    flex-wrap: wrap;
+  }
+  .drives-chip-bar {
+    gap: 6px;
+    padding-bottom: 2px;
+  }
+  .drive-chip {
+    padding: 4px 8px;
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-container {
+    padding: 6px 4px;
+    gap: 8px;
+  }
+  .card {
+    padding: 10px 8px;
+  }
+  .header-inner {
+    padding: 6px 8px;
+    gap: 4px;
+  }
+  .brand-title {
+    font-size: 13px;
+  }
+  .network-bar-inner {
+    padding: 4px 6px;
+  }
+  .net-item {
+    min-width: 140px;
+    padding: 5px 8px;
+  }
+  .card-button-row .btn {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+  .tab-btn {
+    font-size: 10px;
+    padding: 5px 2px;
+  }
+}
 </style>
 </head>
 <body>
 
-<!-- ── Application Header ─────────────────────────────────────────────────── -->
-<header class="app-header">
+<!-- Global Header -->
+<header class="header">
   <div class="header-inner">
-    <div class="brand-wrap">
-      <div class="logo-badge">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       </div>
-      <span class="brand-name">TurboShare</span>
-      <div class="status-badge">
-        <span class="status-dot"></span>
-        <span>Ready &middot; Port {port}</span>
+      <div class="brand-title">
+        TurboShare
+        <span class="status-pill">
+          <span class="status-dot"></span>
+          Hub Active &bull; :__PORT__
+        </span>
       </div>
     </div>
-    
+
     <div class="header-actions">
-      <button class="btn btn-ghost btn-sm" onclick="showGeneralQR()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></svg>
-        QR Connect
+      <button class="btn btn-ghost btn-sm" onclick="showGeneralQR()" title="Show Web QR Code">
+        <svg class="icon" viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
+        <span class="btn-label">QR Connect</span>
       </button>
-      <button class="btn btn-ghost btn-sm" onclick="openModal('helpModal')">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        Guide
+      <button class="btn btn-ghost btn-sm" onclick="openModal('guideModal')" title="How to connect">
+        <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span class="btn-label">Guide</span>
+      </button>
+      <button class="icon-btn" onclick="refreshAll()" title="Refresh Hub">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
       </button>
     </div>
   </div>
 </header>
 
-<!-- ── Network Interfaces Ribbon ──────────────────────────────────────────── -->
+<!-- Network Links Ribbon (Horizontal Wheel Scroll, Touch Swipe, Grid Toggle) -->
 <section class="network-bar">
   <div class="network-bar-inner">
-    <div style="font-size: 11px; color: var(--text-tertiary); text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; white-space: nowrap;">
-      Network Links
+    <button class="scroll-chevron" id="chevronLeft" onclick="scrollRibbon(-260)" title="Scroll Left">
+      <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+
+    <div class="net-scroll-wrapper">
+      <div class="net-scroll-container" id="netScrollContainer">
+        __NET_ITEMS__
+      </div>
     </div>
-    <div class="net-list">
-      {net_items_html}
-    </div>
+
+    <button class="scroll-chevron" id="chevronRight" onclick="scrollRibbon(260)" title="Scroll Right">
+      <svg class="icon" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+
+    <button class="icon-btn" id="gridToggleBtn" onclick="toggleNetworkGridMode()" title="Toggle Ribbon / Grid View">
+      <svg class="icon" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+    </button>
   </div>
 </section>
 
-<!-- ── Main Workbench ─────────────────────────────────────────────────────── -->
+<!-- Main Workbench Grid -->
 <main class="app-container">
 
-  <!-- Left Column: Controls & Upload -->
+  <!-- Left Sidebar Controls -->
   <aside class="sidebar">
 
-    <!-- Host Shared Folder Card -->
-    <div class="panel-card">
-      <div class="panel-card-head">
-        <span class="panel-card-title">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-          Host Shared Folder
-        </span>
-        <span class="mono" style="font-size:11px; color:var(--text-tertiary);">
-          {'Active' if HOST_SHARE else 'Unset'}
-        </span>
+    <!-- Received Storage Target Card -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Received Files Storage
+        </div>
+        <span class="tab-badge">Target</span>
       </div>
-      <div class="panel-card-body">
-        <p style="font-size:12px; color:var(--text-secondary);">
-          Files inside this directory are published for any connected client to browse and download.
-        </p>
-        
-        <div class="path-display">
-          <span class="path-text {'empty' if not HOST_SHARE else ''}" id="hostSharePathText">
-            {share_path_esc}
-          </span>
-          <button class="icon-btn-micro" onclick="copyAddress(document.getElementById('hostSharePathText').textContent.trim())" title="Copy Path">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+
+      <div class="target-box">
+        <div class="target-path-row">
+          <span class="target-path" id="recvPathText">__RECV_PATH__</span>
+          <button class="icon-btn-micro" onclick="copyAddress(document.getElementById('recvPathText').textContent)" title="Copy Path">
+            <svg viewBox="0 0 24 24"><rect width="13" height="13" x="9" y="9" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
         </div>
 
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button class="btn btn-primary btn-sm" onclick="pickShareFolder()">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-            Choose Folder...
-          </button>
-          <button class="btn btn-ghost btn-sm" onclick="openSetPathModal('share')">
-            Edit Path
-          </button>
-          {'<button class="btn btn-ghost btn-sm" onclick="openInExplorer(\'share\')">Open in OS</button>' if HOST_SHARE else ''}
+        <div class="storage-meter">
+          <div class="storage-meter-labels">
+            <span>Disk Space</span>
+            <span class="tabular-nums" id="recvDiskLabel">__RECV_FREE_GB__ GB Free (__RECV_USED_PCT__% used)</span>
+          </div>
+          <div class="storage-track">
+            <div class="storage-fill __RECV_WARN_CLASS__" id="recvDiskBar" style="width: __RECV_USED_PCT__%;"></div>
+          </div>
         </div>
+      </div>
 
-        {'<div class="disk-meter"><span>Disk Available</span><span class="mono">' + share_di.get('free_gb', '?') + ' GB free</span></div>' if HOST_SHARE else ''}
+      <div class="card-button-row">
+        <button class="btn btn-sm" onclick="openHostBrowserModal('recv')">
+          <svg class="icon" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
+          Change Folder
+        </button>
+        <button class="btn btn-sm" onclick="triggerNativePicker('recv')" title="Launch Windows Folder Dialog on Host">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+          OS Dialog
+        </button>
+        <button class="btn btn-sm btn-ghost" onclick="openInExplorer('recv')" title="Open in Windows Explorer">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Open in OS
+        </button>
       </div>
     </div>
 
-    <!-- Receive Files Card -->
-    <div class="panel-card">
-      <div class="panel-card-head">
-        <span class="panel-card-title">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Send Files to Host
-        </span>
-        <button class="btn btn-ghost btn-sm" onclick="openInExplorer('recv')">
-          Open Folder
+    <!-- Host Shared Publishing Card -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg class="icon" style="color: #fbbf24;" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+          Host Shared Folder
+        </div>
+        <span class="tab-badge">Share</span>
+      </div>
+
+      <div class="target-box">
+        <div class="target-path-row">
+          <span class="target-path" id="sharePathText">__SHARE_PATH__</span>
+          <button class="icon-btn-micro" onclick="copyAddress(document.getElementById('sharePathText').textContent)" title="Copy Path">
+            <svg viewBox="0 0 24 24"><rect width="13" height="13" x="9" y="9" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+        </div>
+
+        <div class="storage-meter" id="shareStorageMeter" style="display: __SHARE_METER_DISPLAY__;">
+          <div class="storage-meter-labels">
+            <span>Disk Space</span>
+            <span class="tabular-nums" id="shareDiskLabel">__SHARE_FREE_GB__ GB Free (__SHARE_USED_PCT__% used)</span>
+          </div>
+          <div class="storage-track">
+            <div class="storage-fill __SHARE_WARN_CLASS__" id="shareDiskBar" style="width: __SHARE_USED_PCT__%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-button-row">
+        <button class="btn btn-sm" onclick="openHostBrowserModal('share')">
+          <svg class="icon" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
+          Select Folder
+        </button>
+        <button class="btn btn-sm" onclick="triggerNativePicker('share')" title="Launch Windows Folder Dialog on Host">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+          OS Dialog
+        </button>
+        <button class="btn btn-sm btn-ghost" onclick="openInExplorer('share')" title="Open in Windows Explorer">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Open in OS
         </button>
       </div>
-      <div class="panel-card-body">
-        <div class="dropzone" id="dropZone"
-             onclick="document.getElementById('filePicker').click()"
-             ondragover="handleDragOver(event)"
-             ondragleave="handleDragLeave(event)"
-             ondrop="handleDrop(event)">
-          <div class="dropzone-icon">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          </div>
-          <div class="dropzone-title">Drop files or folders here</div>
-          <div class="dropzone-sub">Uploads straight to Host PC. Smart resume auto-continues interrupted transfers.</div>
-          
-          <div class="dropzone-actions" onclick="event.stopPropagation()">
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('filePicker').click()">Select Files</button>
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('folderPicker').click()">Select Folder</button>
-          </div>
-        </div>
+    </div>
 
-        <input type="file" id="filePicker" multiple style="display:none">
-        <input type="file" id="folderPicker" webkitdirectory multiple style="display:none">
-
-        <div class="disk-meter">
-          <span>Destination Storage</span>
-          <span class="mono">{recv_di['free_gb']} GB free</span>
+    <!-- Send Files Dropzone -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Send Files to Host
         </div>
-        <div style="font-size: 11px; color: var(--text-tertiary); font-family: var(--font-mono); word-break: break-all;">
-          {recv_path_esc}
+      </div>
+
+      <div class="dropzone" id="sidebarDropzone" onclick="document.getElementById('fileInput').click()">
+        <input type="file" id="fileInput" multiple style="display: none;" onchange="handleFileSelect(this.files)">
+        <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;" onchange="handleFileSelect(this.files)">
+        <div class="dropzone-icon">
+          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <div class="dropzone-title">Drop files or click to upload</div>
+        <div class="dropzone-desc">High-speed chunked upload with smart resumption</div>
+        
+        <div class="upload-actions-mobile">
+          <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); document.getElementById('fileInput').click()">
+            Upload Files
+          </button>
+          <button class="btn btn-sm" onclick="event.stopPropagation(); document.getElementById('folderInput').click()">
+            Upload Folder
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Transfer Progress Box -->
+      <div class="transfer-card" id="transferCard">
+        <div class="transfer-header">
+          <span class="transfer-file-name" id="transFileName">Uploading...</span>
+          <span class="tab-badge tabular-nums" id="transPercent">0%</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill" id="transProgressFill"></div>
+        </div>
+        <div class="transfer-meta tabular-nums">
+          <span id="transSpeed">0.0 MB/s</span>
+          <span id="transStatus">Preparing...</span>
         </div>
       </div>
     </div>
 
   </aside>
 
-  <!-- Right Column: File Explorer -->
-  <section class="explorer-card">
-    
-    <!-- Tab navigation -->
-    <div class="explorer-tabs">
-      <div class="explorer-tab active" id="tab-recv" onclick="setTab('recv')">
-        <span>Received Files</span>
-        <span class="tab-badge" id="badge-recv">&middot;</span>
-      </div>
-      <div class="explorer-tab" id="tab-share" onclick="setTab('share')">
-        <span>Host Shared Files</span>
-        <span class="tab-badge" id="badge-share">{'Live' if HOST_SHARE else 'Not Set'}</span>
-      </div>
-    </div>
+  <!-- Right File Explorer Workbench -->
+  <section class="main-content">
+    <div class="explorer-card">
 
-    <!-- Explorer Toolbar -->
-    <div class="explorer-toolbar">
-      <div class="breadcrumbs" id="bcContainer">
-        <span>Root</span>
-      </div>
-      <div class="toolbar-actions">
-        <button class="icon-btn" onclick="refreshCurrentDir()" title="Refresh">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
-        </button>
-        <a id="zipDownloadBtn" class="btn btn-ghost btn-sm" href="#">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Download ZIP
-        </a>
-      </div>
-    </div>
+      <!-- Explorer Top Bar with Dual Tabs -->
+      <div class="explorer-header">
+        <div class="explorer-tabs">
+          <button class="tab-btn active" id="tabRecvBtn" onclick="switchTab('recv')">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Received Files
+            <span class="tab-badge" id="recvCountBadge">0</span>
+          </button>
+          <button class="tab-btn" id="tabShareBtn" onclick="switchTab('share')">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+            Host Shared Files
+            <span class="tab-badge" id="shareCountBadge">0</span>
+          </button>
+        </div>
 
-    <!-- Data Table -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th style="width: 140px;">Size</th>
-            <th class="acts-col" style="width: 120px;">Action</th>
-          </tr>
-        </thead>
-        <tbody id="fileTableBody">
-          <tr>
-            <td colspan="3" class="empty-state">Loading contents...</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+        <div class="header-actions">
+          <button class="btn btn-sm" onclick="downloadCurrentFolderZip()" title="Download current folder as ZIP">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/><rect width="8" height="4" x="8" y="3" rx="1"/></svg>
+            <span class="btn-label">Download ZIP</span>
+          </button>
+          <button class="icon-btn" onclick="refreshActiveDirectory()" title="Refresh file list">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+          </button>
+        </div>
+      </div>
 
+      <!-- Explorer Sub-Toolbar (Search and Breadcrumb) -->
+      <div class="explorer-toolbar">
+        <div class="search-box">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" class="search-input" id="tableSearchInput" placeholder="Filter files in folder..." oninput="handleSearchFilter(this.value)">
+        </div>
+
+        <div class="explorer-breadcrumbs" id="explorerBreadcrumbs">
+          <span class="crumb-item" onclick="navigateBreadcrumb('')">Root</span>
+        </div>
+      </div>
+
+      <!-- File Table -->
+      <div class="table-wrapper">
+        <table class="file-table" id="fileTable">
+          <thead>
+            <tr>
+              <th style="width: 50%;">Name</th>
+              <th style="width: 20%;">Size</th>
+              <th style="width: 30%; text-align: right;">Action</th>
+            </tr>
+          </thead>
+          <tbody id="fileTableBody">
+            <!-- Dynamic File Items Injected via JS -->
+          </tbody>
+        </table>
+
+        <!-- Empty State -->
+        <div class="empty-state" id="emptyState" style="display: none;">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </div>
+          <div style="font-weight: 600; color: var(--text-primary);">No files found in directory</div>
+          <div style="font-size: 11px;">Drop files anywhere to start transferring immediately.</div>
+        </div>
+      </div>
+
+    </div>
   </section>
 
 </main>
 
-<!-- ── Transfer Progress Sheet ────────────────────────────────────────────── -->
-<div class="transfer-sheet" id="transferSheet">
-  <div class="ts-header">
-    <span class="ts-title" id="tsTitle">Transferring</span>
-    <span class="ts-speed" id="tsSpeed">0.0 MB/s</span>
-  </div>
-  <div class="ts-filename" id="tsFilename">Preparing transfer...</div>
-  <div class="progress-track">
-    <div class="progress-fill" id="tsProgressFill"></div>
-  </div>
-  <div class="ts-meta">
-    <span id="tsCount">0 of 0 files</span>
-    <span id="tsPercent">0%</span>
+<!-- Full-Window Drag-and-Drop Overlay -->
+<div class="window-drop-overlay" id="windowDropOverlay">
+  <div class="window-drop-box">
+    <div class="dropzone-icon" style="width: 64px; height: 64px;">
+      <svg style="width: 32px; height: 32px;" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    </div>
+    <div style="font-size: 18px; font-weight: 600; color: var(--text-primary);">Drop files anywhere to upload</div>
+    <div style="font-size: 12px; color: var(--text-secondary);">Uploading to: <span class="mono" id="dropTargetName">Received Files</span></div>
   </div>
 </div>
 
-<!-- ── QR Code Modal ──────────────────────────────────────────────────────── -->
-<div class="modal-overlay" id="qrModal" onclick="closeModal('qrModal')">
-  <div class="modal-content" onclick="event.stopPropagation()">
+<!-- In-Browser Host Folder Navigator Modal -->
+<div class="modal-overlay" id="hostBrowserModal">
+  <div class="modal-content">
     <div class="modal-header">
-      <h3 class="modal-title" id="qrModalTitle">Connect Device</h3>
-      <button class="icon-btn-micro" onclick="closeModal('qrModal')">&times;</button>
-    </div>
-    <div style="text-align: center; margin: 16px 0;">
-      <div style="background: #fff; padding: 14px; border-radius: var(--radius-md); display: inline-block;">
-        <img id="qrModalImg" src="" alt="QR Code" style="width: 200px; height: 200px; display: block;">
+      <div class="modal-title">
+        <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
+        <span id="hostBrowserModalTitle">Browse Host Filesystem</span>
       </div>
-      <p id="qrModalUrl" class="mono" style="margin-top: 12px; font-size: 12px; color: var(--text-secondary);"></p>
+      <button class="icon-btn-micro" onclick="closeModal('hostBrowserModal')">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 16px;">
-      {qr_options_html}
+
+    <div class="modal-body">
+      <!-- Drives Chips Bar -->
+      <div class="drives-chip-bar" id="modalDrivesBar">
+        <!-- Rendered via JS -->
+      </div>
+
+      <!-- Current Modal Breadcrumb & Manual Input -->
+      <div style="display: flex; gap: 8px;">
+        <input type="text" class="btn" style="flex: 1; text-align: left; font-family: var(--font-mono); font-size: 11px; cursor: text;" id="modalCurrentPathInput" placeholder="Enter path or browse below...">
+        <button class="btn btn-sm" onclick="browseModalPath(document.getElementById('modalCurrentPathInput').value)">Go</button>
+        <button class="btn btn-sm" onclick="promptCreateNewFolder()" title="Create new subfolder here">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+          New
+        </button>
+      </div>
+
+      <!-- Subfolder Tree List -->
+      <div class="folder-tree-list" id="modalFolderTreeList">
+        <!-- Injected via JS -->
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-ghost btn-sm" onclick="triggerNativePicker(browserModalTarget)">Launch OS Dialog</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('hostBrowserModal')">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="confirmModalFolderSelection()">Select This Folder</button>
     </div>
   </div>
 </div>
 
-<!-- ── Set Folder Path Modal ──────────────────────────────────────────────── -->
-<div class="modal-overlay" id="setPathModal" onclick="closeModal('setPathModal')">
-  <div class="modal-content" onclick="event.stopPropagation()">
+<!-- QR Connect Modal -->
+<div class="modal-overlay" id="qrModal">
+  <div class="modal-content" style="max-width: 400px; text-align: center;">
     <div class="modal-header">
-      <h3 class="modal-title">Set Folder Path</h3>
-      <button class="icon-btn-micro" onclick="closeModal('setPathModal')">&times;</button>
+      <div class="modal-title" id="qrModalTitle">Connect Device</div>
+      <button class="icon-btn-micro" onclick="closeModal('qrModal')">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <p style="font-size: 12px; color: var(--text-secondary);">
-      Specify absolute directory path on the host computer:
-    </p>
-    <input type="text" id="manualPathInput" class="input-text" placeholder="e.g. D:/MyFolder">
-    <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px;">
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('setPathModal')">Cancel</button>
-      <button class="btn btn-primary btn-sm" onclick="submitManualPath()">Save Path</button>
+    <div class="modal-body" style="align-items: center; gap: 16px;">
+      <div style="background: #ffffff; padding: 12px; border-radius: var(--radius-md); display: inline-block;">
+        <img id="qrModalImg" src="" alt="QR Code" style="width: 220px; height: 220px; display: block;">
+      </div>
+      <div class="mono" id="qrModalUrl" style="font-size: 12px; color: var(--text-primary); word-break: break-all;"></div>
+      <div style="font-size: 11px; color: var(--text-tertiary);">Scan with your phone or tablet camera to connect instantly over local Wi-Fi / Hotspot.</div>
+    </div>
+    <div class="modal-footer" style="justify-content: center;">
+      <button class="btn btn-primary btn-sm" onclick="copyAddress(document.getElementById('qrModalUrl').textContent)">Copy Link</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('qrModal')">Close</button>
     </div>
   </div>
 </div>
 
-<!-- ── Help / Guide Modal ─────────────────────────────────────────────────── -->
-<div class="modal-overlay" id="helpModal" onclick="closeModal('helpModal')">
-  <div class="modal-content" style="max-width: 540px;" onclick="event.stopPropagation()">
+<!-- Guide / Shortcuts Modal -->
+<div class="modal-overlay" id="guideModal">
+  <div class="modal-content" style="max-width: 480px;">
     <div class="modal-header">
-      <h3 class="modal-title">Network &amp; Speed Guide</h3>
-      <button class="icon-btn-micro" onclick="closeModal('helpModal')">&times;</button>
+      <div class="modal-title">TurboShare Connection Guide</div>
+      <button class="icon-btn-micro" onclick="closeModal('guideModal')">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <div style="display: flex; flex-direction: column; gap: 14px; font-size: 12px; color: var(--text-secondary); line-height: 1.6;">
-      <div>
-        <strong style="color: var(--text-primary); display: block; margin-bottom: 2px;">Direct PC-to-PC Ethernet (Max Speed: 60&ndash;110 MB/s)</strong>
-        Plug an Ethernet cable directly between both computers. No router needed. Windows auto-assigns <code>169.254.x.x</code> addresses. Use the "Direct Cable" link.
-      </div>
-      <div>
-        <strong style="color: var(--text-primary); display: block; margin-bottom: 2px;">Mobile Hotspot (20&ndash;40 MB/s)</strong>
-        Ensure your laptop hotspot band is set to <strong>5 GHz</strong> in Windows Settings &rarr; Network &rarr; Mobile Hotspot &rarr; Edit &rarr; Band: 5 GHz. Friend connects and opens <code>192.168.137.1:{port}</code>.
-      </div>
-      <div>
-        <strong style="color: var(--text-primary); display: block; margin-bottom: 2px;">Cross-Device Support</strong>
-        Any browser works: iPhone, iPad, Android, Mac, Linux, Xbox, PlayStation, and Smart TVs.
-      </div>
-      <div>
-        <strong style="color: var(--text-primary); display: block; margin-bottom: 2px;">Interrupted Transfers (Smart Resume)</strong>
-        Simply drop the same file or folder again. TurboShare computes existing bytes and continues without restarting from 0.
-      </div>
+    <div class="modal-body" style="font-size: 12px; line-height: 1.6; color: var(--text-secondary);">
+      <p><strong style="color: var(--text-primary);">1. Wi-Fi Mode (Phones & Laptops):</strong> Connect both devices to the same Wi-Fi network and open the Wi-Fi IP address shown in the top ribbon.</p>
+      <p><strong style="color: var(--text-primary);">2. Mobile Hotspot:</strong> Enable Hotspot on your phone or PC, connect the other device, and use the Hotspot link (192.168.137.x).</p>
+      <p><strong style="color: var(--text-primary);">3. Direct Ethernet Cable (90-115 MB/s):</strong> Plug an Ethernet cable directly between two PCs. Both will auto-assign 169.254.x.x addresses for ultra-high-speed P2P transfer.</p>
+      <p><strong style="color: var(--text-primary);">4. Zero-Corruption Smart Resume:</strong> Interrupted uploads automatically resume from the exact byte where the connection dropped.</p>
     </div>
-    <div style="margin-top: 20px; text-align: right;">
-      <button class="btn btn-ghost btn-sm" onclick="closeModal('helpModal')">Close</button>
+    <div class="modal-footer">
+      <button class="btn btn-primary btn-sm" onclick="closeModal('guideModal')">Got it</button>
     </div>
   </div>
 </div>
 
-<!-- Toast element -->
-<div class="toast" id="toast"></div>
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
 
-<!-- ── Client Logic ───────────────────────────────────────────────────────── -->
+<!-- ═══════════════════════════════════════════════════════════════════════════════
+     JAVASCRIPT CLIENT APPLICATION ENGINE
+     ═══════════════════════════════════════════════════════════════════════════════ -->
 <script>
+/* Global App State */
 let activeTab = 'recv';
 let curRecvPath = '';
 let curSharePath = '';
+let currentItems = [];
 let isTransferring = false;
-let editingTarget = 'share';
+let browserModalTarget = 'recv';
+let activeModalBrowsePath = '';
 
-/* Tab Switcher */
-function setTab(tab) {{
+/* Ribbon Horizontal Wheel Scroll & Chevrons */
+const netScrollContainer = document.getElementById('netScrollContainer');
+if (netScrollContainer) {
+  netScrollContainer.addEventListener('wheel', e => {
+    if (!netScrollContainer.classList.contains('grid-mode')) {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        netScrollContainer.scrollLeft += e.deltaY * 0.8;
+      }
+    }
+  }, { passive: false });
+}
+
+function scrollRibbon(delta) {
+  if (netScrollContainer) {
+    netScrollContainer.scrollBy({ left: delta, behavior: 'smooth' });
+  }
+}
+
+function toggleNetworkGridMode() {
+  if (netScrollContainer) {
+    netScrollContainer.classList.toggle('grid-mode');
+  }
+}
+
+/* Tab Switching (Received vs Host Shared) */
+function switchTab(tab) {
   activeTab = tab;
-  document.getElementById('tab-recv').classList.toggle('active', tab === 'recv');
-  document.getElementById('tab-share').classList.toggle('active', tab === 'share');
-  loadDirectory(tab, tab === 'recv' ? curRecvPath : curSharePath, true);
-}}
+  document.getElementById('tabRecvBtn').classList.toggle('active', tab === 'recv');
+  document.getElementById('tabShareBtn').classList.toggle('active', tab === 'share');
+  document.getElementById('dropTargetName').textContent = tab === 'recv' ? 'Received Files' : 'Host Shared Files';
+  const curPath = tab === 'recv' ? curRecvPath : curSharePath;
+  loadDirectory(tab, curPath, true);
+}
 
-/* File Table Loader */
-async function loadDirectory(tab, relPath, force) {{
-  if (tab === 'recv') curRecvPath = relPath || '';
-  else curSharePath = relPath || '';
-
-  const zipBtn = document.getElementById('zipDownloadBtn');
-  zipBtn.href = '/api/zip?tab=' + tab + '&path=' + encodeURIComponent(relPath || '');
-  renderBreadcrumbs(tab, relPath);
-
-  try {{
-    const res = await fetch('/api/list?tab=' + tab + '&path=' + encodeURIComponent(relPath || ''));
+/* Directory Loading & Rendering */
+async function loadDirectory(tab, relPath, showLoading = false) {
+  const tableBody = document.getElementById('fileTableBody');
+  const emptyState = document.getElementById('emptyState');
+  
+  try {
+    const res = await fetch('/api/list?tab=' + tab + '&path=' + encodeURIComponent(relPath));
     const data = await res.json();
-    const tbody = document.getElementById('fileTableBody');
-    tbody.innerHTML = '';
+    currentItems = data.items || [];
 
-    if (relPath) {{
-      const parent = relPath.includes('/') ? relPath.substring(0, relPath.lastIndexOf('/')) : '';
-      const row = tbody.insertRow();
-      row.innerHTML = `
-        <td colspan="3">
-          <div class="row-item" onclick="loadDirectory('${{tab}}', '${{parent}}', true)">
-            <span class="row-icon">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
-            </span>
-            <span class="mono">.. (Parent Directory)</span>
-          </div>
-        </td>`;
-    }}
+    // Update Tab Badges
+    if (tab === 'recv') {
+      document.getElementById('recvCountBadge').textContent = currentItems.length;
+      curRecvPath = relPath;
+    } else {
+      document.getElementById('shareCountBadge').textContent = currentItems.length;
+      curSharePath = relPath;
+    }
 
-    if (!data.items || !data.items.length) {{
-      const row = tbody.insertRow();
-      row.innerHTML = `
-        <td colspan="3" class="empty-state">
-          ${{tab === 'share' ? 'No folder shared by host yet, or folder is empty.' : 'No files received yet. Drop files on the left to transfer.'}}
-        </td>`;
-      return;
-    }}
+    renderBreadcrumbs(relPath);
+    renderTableItems(currentItems);
+  } catch (e) {
+    console.error('Failed to load directory:', e);
+  }
+}
 
-    for (const item of data.items) {{
-      const itemRel = (relPath ? relPath + '/' : '') + item.name;
-      const row = tbody.insertRow();
-      if (item.isDir) {{
-        row.innerHTML = `
-          <td>
-            <div class="row-item" onclick="loadDirectory('${{tab}}', '${{itemRel}}', true)">
-              <span class="row-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
-              </span>
-              <span>${{escapeHtml(item.name)}}</span>
-            </div>
-          </td>
-          <td class="size-col">${{item.count}} items</td>
-          <td class="acts-col">
-            <a class="btn btn-ghost btn-sm" href="/api/zip?tab=${{tab}}&path=${{encodeURIComponent(itemRel)}}">ZIP</a>
-          </td>`;
-      }} else {{
-        const mb = (item.size / (1024 * 1024)).toFixed(2);
-        row.innerHTML = `
-          <td>
-            <a class="row-item" href="/download?tab=${{tab}}&path=${{encodeURIComponent(itemRel)}}" target="_blank">
-              <span class="row-icon">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
-              </span>
-              <span>${{escapeHtml(item.name)}}</span>
-            </a>
-          </td>
-          <td class="size-col">${{mb}} MB</td>
-          <td class="acts-col">
-            <a class="btn btn-ghost btn-sm" href="/download?tab=${{tab}}&path=${{encodeURIComponent(itemRel)}}" download>Download</a>
-          </td>`;
-      }}
-    }}
-  }} catch (e) {{
-    console.error(e);
-  }}
-}}
+function renderBreadcrumbs(relPath) {
+  const bc = document.getElementById('explorerBreadcrumbs');
+  bc.innerHTML = '';
+  
+  const rootCrumb = document.createElement('span');
+  rootCrumb.className = 'crumb-item';
+  rootCrumb.textContent = 'Root';
+  rootCrumb.onclick = () => navigateBreadcrumb('');
+  bc.appendChild(rootCrumb);
 
-function renderBreadcrumbs(tab, relPath) {{
-  const container = document.getElementById('bcContainer');
-  container.innerHTML = `<span class="bc-link" onclick="loadDirectory('${{tab}}', '', true)">${{tab === 'recv' ? 'Received' : 'Shared'}} Root</span>`;
   if (!relPath) return;
 
+  const parts = relPath.replace(/\\\\/g, '/').split('/').filter(Boolean);
   let acc = '';
-  relPath.split('/').forEach(part => {{
-    acc = acc ? acc + '/' + part : part;
-    const target = acc;
-    container.innerHTML += ` / <span class="bc-link" onclick="loadDirectory('${{tab}}', '${{target}}', true)">${{escapeHtml(part)}}</span>`;
-  }});
-}}
+  for (let i = 0; i < parts.length; i++) {
+    const sep = document.createElement('span');
+    sep.className = 'crumb-sep';
+    sep.textContent = '>';
+    bc.appendChild(sep);
 
-function refreshCurrentDir() {{
-  loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, true);
-}}
+    acc += (acc ? '/' : '') + parts[i];
+    const itemPath = acc;
+    const item = document.createElement('span');
+    item.className = 'crumb-item';
+    item.textContent = parts[i];
+    item.onclick = () => navigateBreadcrumb(itemPath);
+    bc.appendChild(item);
+  }
+}
 
-/* Drag & Drop Upload Handlers */
-function handleDragOver(e) {{
-  e.preventDefault();
-  document.getElementById('dropZone').classList.add('active');
-}}
+function navigateBreadcrumb(path) {
+  if (activeTab === 'recv') curRecvPath = path;
+  else curSharePath = path;
+  loadDirectory(activeTab, path, true);
+}
 
-function handleDragLeave(e) {{
-  document.getElementById('dropZone').classList.remove('active');
-}}
+function renderTableItems(items) {
+  const tableBody = document.getElementById('fileTableBody');
+  const emptyState = document.getElementById('emptyState');
+  tableBody.innerHTML = '';
 
-async function handleDrop(e) {{
-  e.preventDefault();
-  document.getElementById('dropZone').classList.remove('active');
-  const items = e.dataTransfer.items;
-  const entries = [];
+  if (!items || items.length === 0) {
+    emptyState.style.display = 'flex';
+    return;
+  }
+  emptyState.style.display = 'none';
 
-  for (let i = 0; i < items.length; i++) {{
-    const entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
-    if (entry) await traverseEntry(entry, '', entries);
-    else if (e.dataTransfer.files[i]) entries.push({{ file: e.dataTransfer.files[i], rel: e.dataTransfer.files[i].name }});
-  }}
+  items.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = 'file-row';
 
-  if (entries.length) startUpload(entries);
-}}
+    // File Icon classification
+    let iconBoxClass = 'file-icon-box';
+    let iconSvg = '<svg viewBox="0 0 24 24"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    let actionBtnHtml = '';
 
-async function traverseEntry(entry, base, list) {{
-  if (entry.isFile) {{
-    const file = await new Promise(res => entry.file(res));
-    list.push({{ file, rel: (base ? base + '/' : '') + file.name }});
-  }} else if (entry.isDirectory) {{
-    const reader = entry.createReader();
-    const children = await new Promise(res => reader.readEntries(res));
-    for (const child of children) {{
-      await traverseEntry(child, (base ? base + '/' : '') + entry.name, list);
-    }}
-  }}
-}}
+    if (item.isDir) {
+      iconBoxClass += ' folder';
+      iconSvg = '<svg viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
+      tr.onclick = () => {
+        const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+        const newPath = curPath ? curPath + '/' + item.name : item.name;
+        navigateBreadcrumb(newPath);
+      };
+      actionBtnHtml = `
+        <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation(); downloadFolderZip('${encodeURIComponent(item.name)}')">
+          <svg class="icon" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="3" rx="1"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          ZIP
+        </button>
+      `;
+    } else {
+      const ext = (item.name.split('.').pop() || '').toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
+        iconBoxClass += ' image';
+        iconSvg = '<svg viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>';
+      } else if (['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext)) {
+        iconBoxClass += ' video';
+        iconSvg = '<svg viewBox="0 0 24 24"><polygon points="23 7 16 12 23 17 23 7"/><rect width="14" height="14" x="1" y="5" rx="2"/></svg>';
+      } else if (['mp3', 'wav', 'flac', 'aac', 'ogg'].includes(ext)) {
+        iconBoxClass += ' audio';
+        iconSvg = '<svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+      } else if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) {
+        iconBoxClass += ' zip';
+        iconSvg = '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/><rect width="8" height="4" x="8" y="3" rx="1"/></svg>';
+      } else if (['js', 'py', 'ts', 'html', 'css', 'json', 'cpp', 'rs', 'go'].includes(ext)) {
+        iconBoxClass += ' code';
+        iconSvg = '<svg viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
+      }
 
-document.getElementById('filePicker').onchange = e => {{
-  const list = Array.from(e.target.files).map(f => ({{ file: f, rel: f.name }}));
-  if (list.length) startUpload(list);
-}};
+      tr.onclick = () => downloadFile(item.name);
+      actionBtnHtml = `
+        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); downloadFile('${encodeURIComponent(item.name)}')">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download
+        </button>
+      `;
+    }
 
-document.getElementById('folderPicker').onchange = e => {{
-  const list = Array.from(e.target.files).map(f => ({{ file: f, rel: f.webkitRelativePath || f.name }}));
-  if (list.length) startUpload(list);
-}};
+    const sizeDisplay = item.isDir ? (item.count + ' items') : formatBytes(item.size || 0);
 
-/* Resumable Upload Pipeline */
-async function startUpload(items) {{
-  if (!items.length || isTransferring) return;
+    tr.innerHTML = `
+      <td>
+        <div class="file-name-cell">
+          <div class="${iconBoxClass}">${iconSvg}</div>
+          <span title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+        </div>
+      </td>
+      <td class="tabular-nums">${sizeDisplay}</td>
+      <td class="file-actions-cell">${actionBtnHtml}</td>
+    `;
+    tableBody.appendChild(tr);
+  });
+}
+
+function handleSearchFilter(query) {
+  const q = (query || '').toLowerCase().trim();
+  if (!q) {
+    renderTableItems(currentItems);
+    return;
+  }
+  const filtered = currentItems.filter(i => i.name.toLowerCase().includes(q));
+  renderTableItems(filtered);
+}
+
+function refreshActiveDirectory() {
+  const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+  loadDirectory(activeTab, curPath, true);
+  showToast('Refreshed file list', 'info');
+}
+
+function refreshAll() {
+  refreshActiveDirectory();
+  fetchStorageMetrics();
+}
+
+/* File & Folder Downloads */
+function downloadFile(name) {
+  const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+  const fullRel = curPath ? curPath + '/' + decodeURIComponent(name) : decodeURIComponent(name);
+  window.location.href = '/download?tab=' + activeTab + '&path=' + encodeURIComponent(fullRel);
+}
+
+function downloadFolderZip(name) {
+  const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+  const fullRel = curPath ? curPath + '/' + decodeURIComponent(name) : decodeURIComponent(name);
+  window.location.href = '/api/zip?tab=' + activeTab + '&path=' + encodeURIComponent(fullRel);
+}
+
+function downloadCurrentFolderZip() {
+  const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+  window.location.href = '/api/zip?tab=' + activeTab + '&path=' + encodeURIComponent(curPath);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SMART RESUMABLE CHUNKED UPLOAD ENGINE
+   ═══════════════════════════════════════════════════════════════════════════════ */
+async function handleFileSelect(files) {
+  if (!files || files.length === 0) return;
+  const fileArray = Array.from(files);
+  
   isTransferring = true;
+  const card = document.getElementById('transferCard');
+  card.classList.add('active');
 
-  const sheet = document.getElementById('transferSheet');
-  sheet.classList.add('active');
+  for (let i = 0; i < fileArray.length; i++) {
+    const file = fileArray[i];
+    const relPath = file.webkitRelativePath || file.name;
+    document.getElementById('transFileName').textContent = `[${i + 1}/${fileArray.length}] ${file.name}`;
+    
+    try {
+      await uploadFileWithSmartResume(file, relPath);
+    } catch (e) {
+      showToast(`Upload failed for ${file.name}: ${e.message}`, 'error');
+    }
+  }
 
-  const totalBytes = items.reduce((acc, i) => acc + i.file.size, 0);
-  let sentBytes = 0;
-  let doneCount = 0;
-  let skippedCount = 0;
-  let lastBytes = 0;
-  let lastTime = Date.now();
-
-  const CONCURRENCY = 2;
-  let cursor = 0;
-
-  async function worker() {{
-    while (cursor < items.length) {{
-      const idx = cursor++;
-      const {{ file, rel }} = items[idx];
-      const targetRel = curRecvPath ? curRecvPath + '/' + rel : rel;
-
-      let startOffset = 0;
-      let skip = false;
-
-      try {{
-        const checkRes = await fetch('/api/check?path=' + encodeURIComponent(targetRel));
-        const checkData = await checkRes.json();
-        if (checkData.size === file.size) {{
-          skip = true;
-          skippedCount++;
-          sentBytes += file.size;
-        }} else if (checkData.size > 0 && checkData.size < file.size) {{
-          startOffset = checkData.size;
-          sentBytes += startOffset;
-          document.getElementById('tsFilename').textContent = 'Resuming: ' + rel;
-        }}
-      }} catch (_) {{}}
-
-      if (!skip) {{
-        document.getElementById('tsFilename').textContent = rel;
-        for (let retry = 0; retry < 5; retry++) {{
-          try {{
-            await uploadSlice(file, targetRel, startOffset, delta => {{
-              sentBytes += delta;
-              startOffset += delta;
-            }});
-            break;
-          }} catch (err) {{
-            await new Promise(r => setTimeout(r, 1200));
-            try {{
-              const r2 = await fetch('/api/check?path=' + encodeURIComponent(targetRel));
-              const d2 = await r2.json();
-              if (d2.size > 0) startOffset = d2.size;
-            }} catch (__) {{}}
-          }}
-        }}
-      }}
-
-      doneCount++;
-      const pct = totalBytes > 0 ? Math.min(100, Math.round((sentBytes / totalBytes) * 100)) : 100;
-      document.getElementById('tsProgressFill').style.width = pct + '%';
-      document.getElementById('tsPercent').textContent = pct + '%';
-      document.getElementById('tsCount').textContent = `${{doneCount}} / ${{items.length}} files`;
-
-      const now = Date.now();
-      const dt = (now - lastTime) / 1000;
-      if (dt >= 0.5) {{
-        const speedMb = (sentBytes - lastBytes) / (1024 * 1024) / dt;
-        document.getElementById('tsSpeed').textContent = Math.max(0, speedMb).toFixed(1) + ' MB/s';
-        lastBytes = sentBytes;
-        lastTime = now;
-      }}
-    }}
-  }}
-
-  await Promise.all(Array.from({{ length: Math.min(CONCURRENCY, items.length) }}, worker));
-
-  document.getElementById('tsProgressFill').style.width = '100%';
-  document.getElementById('tsSpeed').textContent = 'Complete';
-  document.getElementById('tsFilename').textContent = `Uploaded ${{items.length}} items (${{skippedCount}} unchanged)`;
   isTransferring = false;
+  setTimeout(() => card.classList.remove('active'), 2500);
+  document.getElementById('transStatus').textContent = 'All transfers complete!';
+  showToast('Upload complete!', 'success');
+  refreshActiveDirectory();
+  fetchStorageMetrics();
+}
 
-  setTimeout(() => sheet.classList.remove('active'), 4000);
-  loadDirectory('recv', curRecvPath, true);
-}}
+async function uploadFileWithSmartResume(file, relPath) {
+  const fullTargetRel = curRecvPath ? curRecvPath + '/' + relPath : relPath;
+  
+  // 1. Check existing byte length on server for smart resumption
+  let startOffset = 0;
+  try {
+    const checkRes = await fetch('/api/check?path=' + encodeURIComponent(fullTargetRel));
+    const checkData = await checkRes.json();
+    if (checkData.exists && checkData.size > 0) {
+      if (checkData.size === file.size) {
+        // File already completely transferred
+        updateProgressUI(file.size, file.size, 'File already complete');
+        return;
+      } else if (checkData.size < file.size) {
+        startOffset = checkData.size;
+        showToast(`Resuming ${file.name} from ${formatBytes(startOffset)}...`, 'info');
+      }
+    }
+  } catch (e) {
+    startOffset = 0;
+  }
 
-function uploadSlice(file, relPath, offset, onProgressDelta) {{
-  return new Promise((resolve, reject) => {{
+  // 2. Perform resumable stream upload with watchdog timer
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    let loadedSoFar = 0;
-    let lastActive = Date.now();
+    let lastLoaded = startOffset;
+    let lastTime = Date.now();
 
-    const watchdog = setInterval(() => {{
-      if (Date.now() - lastActive > 20000) {{
+    // 25-Second Watchdog Timer
+    let lastActive = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActive > 25000) {
         clearInterval(watchdog);
         xhr.abort();
-        reject(new Error('timeout'));
-      }}
-    }}, 3000);
+        reject(new Error('Connection timed out'));
+      }
+    }, 4000);
 
-    xhr.upload.onprogress = e => {{
+    xhr.upload.onprogress = e => {
       lastActive = Date.now();
-      const delta = e.loaded - loadedSoFar;
-      loadedSoFar = e.loaded;
-      if (delta > 0) onProgressDelta(delta);
-    }};
+      const currentTotalLoaded = startOffset + e.loaded;
+      const now = Date.now();
+      const dt = (now - lastTime) / 1000;
+      if (dt > 0.4) {
+        const speedMB = ((e.loaded - (lastLoaded - startOffset)) / (1024 * 1024)) / dt;
+        lastLoaded = currentTotalLoaded;
+        lastTime = now;
+        document.getElementById('transSpeed').textContent = `${speedMB.toFixed(1)} MB/s`;
+      }
+      updateProgressUI(currentTotalLoaded, file.size, 'Uploading...');
+    };
 
-    xhr.open('POST', '/api/upload?path=' + encodeURIComponent(relPath) + '&offset=' + offset, true);
-    xhr.onload = () => {{
-      clearInterval(watchdog);
-      xhr.status === 200 ? resolve() : reject(new Error(xhr.statusText));
-    }};
-    xhr.onerror = () => {{
-      clearInterval(watchdog);
-      reject(new Error('network_error'));
-    }};
-    xhr.onabort = () => {{
-      clearInterval(watchdog);
-      reject(new Error('aborted'));
-    }};
+    xhr.open('POST', '/api/upload?path=' + encodeURIComponent(fullTargetRel) + '&offset=' + startOffset, true);
 
-    xhr.send(offset > 0 ? file.slice(offset) : file);
-  }});
-}}
+    xhr.onload = () => {
+      clearInterval(watchdog);
+      if (xhr.status === 200) {
+        updateProgressUI(file.size, file.size, 'Saved');
+        resolve();
+      } else {
+        reject(new Error(xhr.statusText || 'Upload failed'));
+      }
+    };
 
-/* Host Folder Actions */
-async function pickShareFolder() {{
-  try {{
-    const res = await fetch('/api/pick_folder');
+    xhr.onerror = () => {
+      clearInterval(watchdog);
+      reject(new Error('Network error during upload'));
+    };
+
+    xhr.onabort = () => {
+      clearInterval(watchdog);
+      reject(new Error('Upload aborted'));
+    };
+
+    const payload = startOffset > 0 ? file.slice(startOffset) : file;
+    xhr.send(payload);
+  });
+}
+
+function updateProgressUI(loaded, total, statusText) {
+  const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+  document.getElementById('transPercent').textContent = pct + '%';
+  document.getElementById('transProgressFill').style.width = pct + '%';
+  document.getElementById('transStatus').textContent = `${formatBytes(loaded)} / ${formatBytes(total)} &bull; ${statusText}`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   FULL-WINDOW DRAG-AND-DROP OVERLAY HANDLERS
+   ═══════════════════════════════════════════════════════════════════════════════ */
+let dragCounter = 0;
+const dropOverlay = document.getElementById('windowDropOverlay');
+
+window.addEventListener('dragenter', e => {
+  e.preventDefault();
+  dragCounter++;
+  if (dropOverlay) dropOverlay.classList.add('active');
+});
+
+window.addEventListener('dragover', e => {
+  e.preventDefault();
+});
+
+window.addEventListener('dragleave', e => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0 && dropOverlay) {
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+  }
+});
+
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  dragCounter = 0;
+  if (dropOverlay) dropOverlay.classList.remove('active');
+  if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+    handleFileSelect(e.dataTransfer.files);
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   IN-BROWSER HOST FOLDER NAVIGATOR MODAL
+   ═══════════════════════════════════════════════════════════════════════════════ */
+function openHostBrowserModal(target) {
+  browserModalTarget = target;
+  document.getElementById('hostBrowserModalTitle').textContent = target === 'recv' 
+    ? 'Select Received Files Folder on Host' 
+    : 'Select Host Shared Folder';
+  
+  let initialPath = target === 'recv' 
+    ? (document.getElementById('recvPathText')?.textContent.trim() || '') 
+    : (document.getElementById('sharePathText')?.textContent.trim() || '');
+  if (initialPath === 'No folder selected') initialPath = '';
+
+  openModal('hostBrowserModal');
+  browseModalPath(initialPath);
+}
+
+async function browseModalPath(path) {
+  const listEl = document.getElementById('modalFolderTreeList');
+  const drivesBar = document.getElementById('modalDrivesBar');
+  const inputEl = document.getElementById('modalCurrentPathInput');
+  
+  listEl.innerHTML = '<div style="padding: 16px; color: var(--text-tertiary); text-align: center;">Scanning directories...</div>';
+  
+  try {
+    const res = await fetch('/api/browse_host?path=' + encodeURIComponent(path));
     const data = await res.json();
-    if (data.success) {{
-      location.reload();
-    }} else if (data.error !== 'cancelled') {{
-      showToast('Could not open OS folder dialog: ' + data.error);
-    }}
-  }} catch (e) {{
-    showToast('Failed: ' + e);
-  }}
-}}
+    
+    activeModalBrowsePath = data.current_path || '';
+    inputEl.value = activeModalBrowsePath;
 
-function openSetPathModal(target) {{
-  editingTarget = target;
-  document.getElementById('manualPathInput').value = target === 'share' 
-    ? document.getElementById('hostSharePathText').textContent.trim() 
-    : '';
-  openModal('setPathModal');
-}}
+    // Render Drive Chips
+    drivesBar.innerHTML = '';
+    if (data.drives && data.drives.length > 0) {
+      data.drives.forEach(d => {
+        const chip = document.createElement('div');
+        chip.className = 'drive-chip' + (activeModalBrowsePath.startsWith(d.path) ? ' active' : '');
+        chip.innerHTML = `
+          <svg viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M4 14v-4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/></svg>
+          <span>${d.name}</span>
+          <span style="color: var(--text-tertiary);">(${d.free_gb} GB)</span>
+        `;
+        chip.onclick = () => browseModalPath(d.path);
+        drivesBar.appendChild(chip);
+      });
+    }
 
-async function submitManualPath() {{
-  const path = document.getElementById('manualPathInput').value.trim();
-  if (!path) return;
-  try {{
-    const res = await fetch('/api/set_folder', {{
+    listEl.innerHTML = '';
+
+    // Parent Directory Navigation Item
+    if (data.parent_path !== undefined && data.parent_path !== '') {
+      const parentRow = document.createElement('div');
+      parentRow.className = 'folder-tree-item parent-dir';
+      parentRow.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+          <strong>.. (Parent Directory)</strong>
+        </div>
+        <span style="font-size: 10px; color: var(--text-tertiary);">${escapeHtml(data.parent_path)}</span>
+      `;
+      parentRow.onclick = () => browseModalPath(data.parent_path);
+      listEl.appendChild(parentRow);
+    } else if (!data.is_root) {
+      const rootRow = document.createElement('div');
+      rootRow.className = 'folder-tree-item parent-dir';
+      rootRow.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+          <strong>Drives Root</strong>
+        </div>
+      `;
+      rootRow.onclick = () => browseModalPath('');
+      listEl.appendChild(rootRow);
+    }
+
+    // Subdirectories List
+    if (data.subdirs && data.subdirs.length > 0) {
+      data.subdirs.forEach(s => {
+        const itemRow = document.createElement('div');
+        itemRow.className = 'folder-tree-item';
+        itemRow.innerHTML = `
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <svg class="icon" style="color: #fbbf24;" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+            <span>${escapeHtml(s.name)}</span>
+          </div>
+          <svg class="icon" style="color: var(--text-tertiary);" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+        `;
+        itemRow.onclick = () => browseModalPath(s.path);
+        listEl.appendChild(itemRow);
+      });
+    } else if (!data.is_root) {
+      const emptyItem = document.createElement('div');
+      emptyItem.style.padding = '14px';
+      emptyItem.style.color = 'var(--text-tertiary)';
+      emptyItem.style.textAlign = 'center';
+      emptyItem.textContent = 'No subfolders in this directory';
+      listEl.appendChild(emptyItem);
+    }
+  } catch (e) {
+    listEl.innerHTML = `<div style="padding: 16px; color: var(--status-error); text-align: center;">Error browsing: ${e.message}</div>`;
+  }
+}
+
+async function promptCreateNewFolder() {
+  const name = prompt('Enter new folder name:');
+  if (!name || !name.trim()) return;
+  
+  try {
+    const res = await fetch('/api/create_folder', {
       method: 'POST',
-      headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ type: editingTarget, path: path }})
-    }});
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parent: activeModalBrowsePath, name: name.trim() })
+    });
     const data = await res.json();
-    if (data.success) {{
-      location.reload();
-    }} else {{
-      showToast('Error: ' + data.error);
-    }}
-  }} catch (e) {{
-    showToast('Failed to set path');
-  }}
-}}
+    if (data.success || data.status === 'ok') {
+      showToast('Created folder: ' + name, 'success');
+      browseModalPath(data.path || activeModalBrowsePath);
+    } else {
+      showToast('Could not create folder: ' + data.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed: ' + e, 'error');
+  }
+}
 
-async function openInExplorer(target) {{
-  try {{
-    await fetch('/api/open_folder?type=' + target);
-    showToast('Opened in Explorer');
-  }} catch (e) {{
-    showToast('Could not open folder');
-  }}
-}}
+async function confirmModalFolderSelection() {
+  const chosen = document.getElementById('modalCurrentPathInput').value.trim();
+  if (!chosen) return;
 
-/* UI Helpers */
-function copyAddress(text) {{
-  navigator.clipboard.writeText(text).then(() => {{
-    showToast('Copied: ' + text);
-  }}).catch(() => {{
+  try {
+    const res = await fetch('/api/set_path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: browserModalTarget, type: browserModalTarget, path: chosen })
+    });
+    const data = await res.json();
+    if (data.status === 'ok' || data.success) {
+      closeModal('hostBrowserModal');
+      showToast('Folder updated: ' + chosen, 'success');
+      if (browserModalTarget === 'recv') {
+        document.getElementById('recvPathText').textContent = chosen;
+      } else {
+        document.getElementById('sharePathText').textContent = chosen;
+        document.getElementById('shareStorageMeter').style.display = 'flex';
+      }
+      fetchStorageMetrics();
+      loadDirectory(activeTab, '', true);
+    } else {
+      showToast('Error setting path: ' + data.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to update folder: ' + e, 'error');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HOST OS INTEGRATION (PowerShell STA Picker & OS Explorer Spawner)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+async function triggerNativePicker(target) {
+  showToast('Opening native folder dialog on Host PC...', 'info');
+  try {
+    const res = await fetch('/api/pick_folder?target=' + target);
+    const data = await res.json();
+    if (data.success || data.status === 'ok') {
+      showToast('Selected: ' + data.path, 'success');
+      if (target === 'recv') {
+        document.getElementById('recvPathText').textContent = data.path;
+      } else {
+        document.getElementById('sharePathText').textContent = data.path;
+        document.getElementById('shareStorageMeter').style.display = 'flex';
+      }
+      closeModal('hostBrowserModal');
+      fetchStorageMetrics();
+      loadDirectory(activeTab, '', true);
+    } else if (data.error !== 'cancelled') {
+      showToast('OS dialog notice: ' + data.error, 'info');
+    }
+  } catch (e) {
+    showToast('Failed to trigger OS dialog: ' + e, 'error');
+  }
+}
+
+async function openInExplorer(target) {
+  try {
+    const res = await fetch('/api/open_folder?type=' + target);
+    const data = await res.json();
+    if (data.success || data.status === 'ok') {
+      showToast(data.message || 'Opened folder in Explorer', 'success');
+      if (!data.is_local && !data.is_local_client) {
+        // Remote client viewing fallback: switch active tab to view in browser
+        switchTab(target);
+      }
+    } else {
+      showToast('Could not open folder: ' + data.error, 'error');
+    }
+  } catch (e) {
+    showToast('Failed to launch explorer: ' + e, 'error');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   STORAGE METRICS REFRESH
+   ═══════════════════════════════════════════════════════════════════════════════ */
+async function fetchStorageMetrics() {
+  try {
+    const recvPath = document.getElementById('recvPathText')?.textContent;
+    if (recvPath) {
+      const res = await fetch('/api/disk?path=' + encodeURIComponent(recvPath));
+      if (res.ok) {
+        const di = await res.json();
+        const lbl = document.getElementById('recvDiskLabel');
+        if (lbl) lbl.textContent = `${di.free_gb} GB Free (${di.used_pct}% used)`;
+        const bar = document.getElementById('recvDiskBar');
+        if (bar) {
+          bar.style.width = di.used_pct + '%';
+          bar.className = 'storage-fill' + (di.used_pct > 70 ? ' warn' : '');
+        }
+      }
+    }
+    const sharePath = document.getElementById('sharePathText')?.textContent;
+    if (sharePath && sharePath !== 'Not configured' && sharePath !== 'No folder selected' && sharePath !== '') {
+      const resShare = await fetch('/api/disk?path=' + encodeURIComponent(sharePath));
+      if (resShare.ok) {
+        const diShare = await resShare.json();
+        const lblShare = document.getElementById('shareDiskLabel');
+        if (lblShare) lblShare.textContent = `${diShare.free_gb} GB Free (${diShare.used_pct}% used)`;
+        const barShare = document.getElementById('shareDiskBar');
+        if (barShare) {
+          barShare.style.width = diShare.used_pct + '%';
+          barShare.className = 'storage-fill' + (diShare.used_pct > 70 ? ' warn' : '');
+        }
+        const meterShare = document.getElementById('shareStorageMeter');
+        if (meterShare) meterShare.style.display = 'flex';
+      }
+    }
+  } catch (e) {}
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   UI MODALS, TOASTS & UTILITIES
+   ═══════════════════════════════════════════════════════════════════════════════ */
+function copyAddress(text, cardEl) {
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Copied address: ' + text, 'success');
+    if (cardEl) {
+      cardEl.classList.add('copied');
+      setTimeout(() => cardEl.classList.remove('copied'), 1800);
+    }
+  }).catch(() => {
     prompt('Copy address:', text);
-  }});
-}}
+  });
+}
 
-function showToast(msg) {{
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2200);
-}}
-
-function showGeneralQR() {{
+function showGeneralQR() {
   showQRModal(window.location.origin, 'TurboShare Web Hub');
-}}
+}
 
-function showQRModal(url, label) {{
+function showQRModal(url, label) {
   document.getElementById('qrModalTitle').textContent = label;
   document.getElementById('qrModalImg').src = '/api/qr?url=' + encodeURIComponent(url);
   document.getElementById('qrModalUrl').textContent = url;
   openModal('qrModal');
-}}
+}
 
-function openModal(id) {{
-  document.getElementById(id).classList.add('open');
-}}
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast-item toast-${type}`;
+  
+  let iconSvg = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+  if (type === 'success') {
+    iconSvg = '<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>';
+  } else if (type === 'error') {
+    iconSvg = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>';
+  }
 
-function closeModal(id) {{
-  document.getElementById(id).classList.remove('open');
-}}
+  toast.innerHTML = `
+    <div class="toast-icon">${iconSvg}</div>
+    <div class="toast-content">
+      <div class="toast-title">${type.charAt(0).toUpperCase() + type.slice(1)}</div>
+      <div class="toast-desc">${escapeHtml(msg)}</div>
+    </div>
+    <button class="icon-btn-micro" onclick="this.closest('.toast-item').remove()">
+      <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  `;
 
-window.addEventListener('keydown', e => {{
-  if (e.key === 'Escape') {{
+  container.appendChild(toast);
+  setTimeout(() => toast.classList.add('show'), 10);
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 250);
+  }, 3800);
+}
+
+function openModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.add('open');
+}
+
+function closeModal(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('open');
+}
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
     document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
-  }}
-}});
+  }
+});
 
-function escapeHtml(str) {{
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function escapeHtml(str) {
   return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}}
+}
 
-/* Auto-sync directory listing every 4 seconds */
-setInterval(() => {{
-  if (!isTransferring) {{
-    loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, false);
-  }}
-}}, 4000);
+/* Auto-sync directory listing every 5 seconds if idle */
+setInterval(() => {
+  if (!isTransferring && !document.querySelector('.modal-overlay.open')) {
+    const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
+    loadDirectory(activeTab, curPath, false);
+  }
+}, 5000);
 
 /* Initial Boot */
 loadDirectory('recv', '', true);
@@ -1538,20 +3010,92 @@ loadDirectory('recv', '', true);
 </html>"""
 
 
+def render_page(port):
+    ifaces = get_network_interfaces()
+    with STATE_LOCK:
+        recv_path = UPLOAD_DIR
+        share_path = HOST_SHARE
+
+    recv_di = disk_info(recv_path)
+    share_di = disk_info(share_path) if share_path else {}
+    
+    recv_path_esc = html.escape(recv_path)
+    share_path_esc = html.escape(share_path) if share_path else "No folder selected"
+
+    # Pre-render network cards
+    net_items = []
+    for i in ifaces:
+        url = f"http://{i['ip']}:{port}"
+        badge_kind = i['kind']
+        label = html.escape(i['label'])
+        desc = html.escape(i['desc'])
+        
+        # SVG icon per adapter kind
+        if badge_kind == 'wifi':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><path d="M12 20h.01"/><path d="M2 8.82a15 15 0 0 1 20 0"/><path d="M5 12.859a10 10 0 0 1 14 0"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/></svg>'
+        elif badge_kind == 'hotspot':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><path d="M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M7.76 7.76a6 6 0 0 0 0 8.48"/><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.48"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>'
+        elif badge_kind == 'ethernet-direct':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><path d="m19 5 3-3"/><path d="m2 22 3-3"/><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4z"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0z"/></svg>'
+        elif badge_kind == 'ethernet':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15v-4"/><path d="M10 15v-4"/><path d="M14 15v-4"/><path d="M17 15v-4"/></svg>'
+        elif badge_kind == 'virtual':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></svg>'
+        elif badge_kind == 'bluetooth':
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>'
+        else:
+            icon_svg = '<svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>'
+
+        net_items.append(f"""
+        <div class="net-item net-card-{badge_kind}" onclick="copyAddress('{url}', this)" title="Click to copy address" role="button" tabindex="0">
+          <div class="net-item-top">
+            <div class="net-kind-badge {badge_kind}">
+              {icon_svg}
+              <span class="net-kind-text">{label}</span>
+            </div>
+            <button class="icon-btn-micro" onclick="event.stopPropagation(); showQRModal('{url}', '{label}')" title="Scan QR Code" aria-label="QR Code">
+              <svg viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
+            </button>
+          </div>
+          <div class="net-item-url tabular-nums">{url}</div>
+          <div class="net-item-desc">{desc}</div>
+          <div class="net-copied-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Copied!</div>
+        </div>
+        """)
+
+    net_items_html = "\n".join(net_items)
+
+    out = HTML_TEMPLATE.replace("__PORT__", str(port))
+    out = out.replace("__NET_ITEMS__", net_items_html)
+    out = out.replace("__RECV_PATH__", recv_path_esc)
+    out = out.replace("__RECV_FREE_GB__", str(recv_di.get('free_gb', '?')))
+    out = out.replace("__RECV_USED_PCT__", str(recv_di.get('used_pct', 0)))
+    out = out.replace("__RECV_WARN_CLASS__", "warn" if recv_di.get('used_pct', 0) > 70 else "")
+    out = out.replace("__SHARE_PATH__", share_path_esc)
+    out = out.replace("__SHARE_METER_DISPLAY__", "flex" if share_path else "none")
+    out = out.replace("__SHARE_FREE_GB__", str(share_di.get('free_gb', '?')))
+    out = out.replace("__SHARE_USED_PCT__", str(share_di.get('used_pct', 0)))
+    out = out.replace("__SHARE_WARN_CLASS__", "warn" if share_di.get('used_pct', 0) > 70 else "")
+
+    return out
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-#  HTTP REQUEST ROUTER
+#  HTTP REQUEST ROUTER (Zero-Dependency Python Backend)
 # ═══════════════════════════════════════════════════════════════════════════════
 class TurboShareHandler(BaseHTTPRequestHandler):
 
     def send_json(self, data, status=200):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(payload)
 
     def do_GET(self):
+        global UPLOAD_DIR, HOST_SHARE
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
@@ -1564,6 +3108,20 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+            return
+
+        # ── Favicon ──
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+
+        # ── Active Network Interfaces ──
+        if path == "/api/interfaces":
+            self.send_json({
+                "interfaces": get_network_interfaces(),
+                "port": SERVER_PORT
+            })
             return
 
         # ── Dynamic QR Code Generation ──
@@ -1588,69 +3146,74 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
             return
 
-        # ── Trigger Native Folder Picker on Host ──
-        if path == "/api/pick_folder":
-            global HOST_SHARE
-            chosen = pick_folder_dialog()
-            if chosen:
-                HOST_SHARE = os.path.abspath(chosen)
-                self.send_json({"success": True, "path": HOST_SHARE})
-            else:
-                self.send_json({"success": False, "error": "cancelled"})
+        # ── In-Browser Host Filesystem Browser ──
+        if path == "/api/browse_host":
+            req_path = qs.get("path", [""])[0]
+            data = browse_host_directory(req_path)
+            self.send_json(data)
             return
 
-        # ── Open in Host OS Explorer ──
-        if path == "/api/open_folder":
-            target_type = qs.get("type", ["recv"])[0]
-            target_dir = HOST_SHARE if target_type == "share" else UPLOAD_DIR
-            if target_dir and os.path.exists(target_dir):
-                if sys.platform == "win32":
-                    os.startfile(target_dir)
-                self.send_json({"success": True})
-            else:
-                self.send_json({"success": False, "error": "directory_not_found"})
-            return
-
-        # ── Smart Resume Check ──
-        if path == "/api/check":
+        # ── Directory Listing for Dual Tabs ──
+        if path == "/api/list":
+            tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
-            full = safe_path(UPLOAD_DIR, rel)
+            with STATE_LOCK:
+                base = HOST_SHARE if tab == "share" else UPLOAD_DIR
+            if not base or not os.path.exists(base):
+                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                return
+            target = safe_path(base, rel) if rel else os.path.abspath(base)
+            if not target or not os.path.isdir(target):
+                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                return
+
+            items = []
+            try:
+                with os.scandir(target) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                count = 0
+                                try:
+                                    count = len(os.listdir(entry.path))
+                                except Exception:
+                                    pass
+                                items.append({"name": entry.name, "isDir": True, "count": count})
+                            else:
+                                items.append({"name": entry.name, "isDir": False, "size": entry.stat().st_size})
+                        except (PermissionError, OSError):
+                            continue
+            except Exception:
+                pass
+
+            items.sort(key=lambda x: (not x["isDir"], x["name"].lower()))
+            self.send_json({
+                "items": items,
+                "path": rel,
+                "disk": disk_info(target),
+                "base": base
+            })
+            return
+
+        # ── Smart Resume Byte Check ──
+        if path == "/api/check":
+            rel = qs.get("path", [""])[0] or qs.get("filename", [""])[0]
+            target_type = qs.get("target", ["recv"])[0]
+            with STATE_LOCK:
+                base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
+            full = safe_path(base, rel)
             if full and os.path.isfile(full):
                 self.send_json({"exists": True, "size": os.path.getsize(full)})
             else:
                 self.send_json({"exists": False, "size": 0})
             return
 
-        # ── Directory Listing ──
-        if path == "/api/list":
-            tab = qs.get("tab", ["recv"])[0]
-            rel = qs.get("path", [""])[0]
-            base = HOST_SHARE if tab == "share" else UPLOAD_DIR
-            if not base or not os.path.exists(base):
-                self.send_json({"items": []})
-                return
-            target = safe_path(base, rel) if rel else os.path.abspath(base)
-            if not target or not os.path.isdir(target):
-                self.send_json({"items": []})
-                return
-            items = []
-            try:
-                for entry in sorted(os.listdir(target), key=lambda x: (not os.path.isdir(os.path.join(target, x)), x.lower())):
-                    fp = os.path.join(target, entry)
-                    if os.path.isdir(fp):
-                        items.append({"name": entry, "isDir": True, "count": len(os.listdir(fp))})
-                    else:
-                        items.append({"name": entry, "isDir": False, "size": os.path.getsize(fp)})
-            except Exception:
-                pass
-            self.send_json({"items": items})
-            return
-
         # ── Download Single File ──
         if path == "/download":
             tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
-            base = HOST_SHARE if tab == "share" else UPLOAD_DIR
+            with STATE_LOCK:
+                base = HOST_SHARE if tab == "share" else UPLOAD_DIR
             if not base:
                 self.send_response(404); self.end_headers(); return
             fp = safe_path(base, rel)
@@ -1662,108 +3225,265 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ct or "application/octet-stream")
             self.send_header("Content-Length", str(size))
-            self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(fp)}"')
+            fname = urllib.parse.quote(os.path.basename(fp))
+            self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(fp)}"; filename*=UTF-8\'\'{fname}')
             self.end_headers()
-            with open(fp, "rb") as f:
-                while chunk := f.read(1024 * 1024):
-                    self.wfile.write(chunk)
+            try:
+                with open(fp, "rb") as f:
+                    while chunk := f.read(1024 * 1024):
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
 
-        # ── Stream Folder as ZIP ──
+        # ── Stream Folder as ZIP Archive ──
         if path == "/api/zip":
-            tab = qs.get("tab", ["recv"])[0]
+            tab = qs.get("tab", ["recv"])[0] or qs.get("target", ["recv"])[0]
             rel = qs.get("path", [""])[0]
-            base = HOST_SHARE if tab == "share" else UPLOAD_DIR
+            with STATE_LOCK:
+                base = HOST_SHARE if tab == "share" else UPLOAD_DIR
             if not base:
                 self.send_response(404); self.end_headers(); return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
                 self.send_response(404); self.end_headers(); return
 
-            zip_name = (os.path.basename(target) or "turboshare") + ".zip"
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition", f'attachment; filename="{zip_name}"')
-            self.end_headers()
+            zip_name = (os.path.basename(target) or "turboshare_export") + ".zip"
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, _, files in os.walk(target):
-                    for file in files:
-                        full_f = os.path.join(root, file)
-                        zf.write(full_f, os.path.relpath(full_f, target))
-            self.wfile.write(buf.getvalue())
+                for root, dirs, files in os.walk(target):
+                    for d in dirs:
+                        dir_full = os.path.join(root, d)
+                        arc_d = os.path.relpath(dir_full, target).replace("\\", "/") + "/"
+                        zf.writestr(arc_d, "")
+                    for f in files:
+                        full_f = os.path.join(root, f)
+                        arc_f = os.path.relpath(full_f, target).replace("\\", "/")
+                        try:
+                            zf.write(full_f, arc_f)
+                        except (PermissionError, OSError):
+                            pass
+
+            raw_zip = buf.getvalue()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(raw_zip)))
+            fname_esc = urllib.parse.quote(zip_name)
+            self.send_header("Content-Disposition", f'attachment; filename="{zip_name}"; filename*=UTF-8\'\'{fname_esc}')
+            self.end_headers()
+            try:
+                self.wfile.write(raw_zip)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        # ── Trigger Native OS Folder Picker ──
+        if path == "/api/pick_folder":
+            target_type = qs.get("target", ["share"])[0] or qs.get("type", ["share"])[0]
+            chosen, err = pick_folder_powershell()
+            if chosen:
+                with STATE_LOCK:
+                    if target_type == "recv":
+                        UPLOAD_DIR = os.path.abspath(chosen)
+                    else:
+                        HOST_SHARE = os.path.abspath(chosen)
+                self.send_json({"success": True, "status": "ok", "path": chosen, "target": target_type})
+            else:
+                self.send_json({"success": False, "status": "cancelled", "error": err or "cancelled"})
+            return
+
+        # ── Open Folder in Host OS Explorer ──
+        if path == "/api/open_folder":
+            target_type = qs.get("type", ["recv"])[0] or qs.get("target", ["recv"])[0]
+            with STATE_LOCK:
+                target_dir = HOST_SHARE if target_type == "share" else UPLOAD_DIR
+            client_ip = self.client_address[0]
+            res = open_in_os_explorer(target_dir, client_ip)
+            self.send_json(res)
+            return
+
+        # ── Disk Space Metrics ──
+        if path == "/api/disk":
+            req_path = qs.get("path", [""])[0] or UPLOAD_DIR
+            self.send_json(disk_info(req_path))
+            return
+
+        # ── Real-Time Path Validation ──
+        if path == "/api/validate_path":
+            req_path = qs.get("path", [""])[0]
+            exists = os.path.exists(req_path) and os.path.isdir(req_path)
+            writable = os.access(req_path, os.W_OK) if exists else False
+            di = disk_info(req_path) if exists else {}
+            self.send_json({
+                "valid": exists and writable,
+                "exists": exists,
+                "writable": writable,
+                "disk": di
+            })
             return
 
         self.send_response(404)
         self.end_headers()
 
     def do_POST(self):
-        global HOST_SHARE, UPLOAD_DIR
+        global UPLOAD_DIR, HOST_SHARE
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
-        # ── Resumable Chunk Upload ──
+        # ── Resumable Chunked Upload Protocol ──
         if path == "/api/upload":
             rel = qs.get("path", ["upload"])[0]
             offset = int(qs.get("offset", [0])[0])
-            full = safe_path(UPLOAD_DIR, rel)
+            target_type = qs.get("target", ["recv"])[0]
+            with STATE_LOCK:
+                base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
+            full = safe_path(base, rel)
             if not full:
                 self.send_response(403); self.end_headers(); return
 
-            os.makedirs(os.path.dirname(full), exist_ok=True)
-            content_len = int(self.headers.get("Content-Length", 0))
-            bytes_written = 0
-            mode = "ab" if offset > 0 else "wb"
+            try:
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                content_len = int(self.headers.get("Content-Length", 0))
+                bytes_written = 0
+                chunk_size = 1024 * 1024  # 1 MB optimal streaming chunk
 
-            with open(full, mode) as f:
-                while bytes_written < content_len:
-                    chunk = self.rfile.read(min(1024 * 1024, content_len - bytes_written))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    bytes_written += len(chunk)
+                if offset == 0:
+                    with open(full, "wb") as f:
+                        while bytes_written < content_len:
+                            to_read = min(chunk_size, content_len - bytes_written)
+                            chunk = self.rfile.read(to_read)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            bytes_written += len(chunk)
+                else:
+                    # Resuming partial upload with atomic seek and truncate
+                    if os.path.exists(full):
+                        with open(full, "r+b") as f:
+                            f.seek(offset)
+                            f.truncate(offset)
+                            while bytes_written < content_len:
+                                to_read = min(chunk_size, content_len - bytes_written)
+                                chunk = self.rfile.read(to_read)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                bytes_written += len(chunk)
+                    else:
+                        with open(full, "wb") as f:
+                            while bytes_written < content_len:
+                                to_read = min(chunk_size, content_len - bytes_written)
+                                chunk = self.rfile.read(to_read)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                                bytes_written += len(chunk)
 
-            self.send_json({"success": True, "saved": rel, "bytes": bytes_written})
+                self.send_json({
+                    "success": True,
+                    "status": "ok",
+                    "saved": rel,
+                    "bytes": bytes_written,
+                    "received": bytes_written,
+                    "completed": True
+                })
+            except Exception as e:
+                self.send_json({"success": False, "status": "error", "error": str(e)}, status=400)
             return
 
-        # ── Manual Path Configuration ──
-        if path == "/api/set_folder":
+        # ── Set Folder Path ──
+        if path in ("/api/set_path", "/api/set_folder"):
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len)
             try:
                 data = json.loads(body.decode("utf-8"))
-                target_type = data.get("type", "share")
-                target_path = os.path.abspath(data.get("path", "").strip())
+                target_type = data.get("target") or data.get("type") or "recv"
+                target_path = os.path.abspath(data.get("path", "").strip().strip("'\""))
 
                 if not os.path.exists(target_path):
                     os.makedirs(target_path, exist_ok=True)
 
-                if target_type == "share":
-                    HOST_SHARE = target_path
-                else:
-                    UPLOAD_DIR = target_path
+                with STATE_LOCK:
+                    if target_type == "share":
+                        HOST_SHARE = target_path
+                    else:
+                        UPLOAD_DIR = target_path
 
-                self.send_json({"success": True, "path": target_path})
+                di = disk_info(target_path)
+                self.send_json({
+                    "success": True,
+                    "status": "ok",
+                    "path": target_path,
+                    "target": target_type,
+                    "free_gb": di.get("free_gb"),
+                    "disk": di
+                })
             except Exception as e:
-                self.send_json({"success": False, "error": str(e)}, status=400)
+                self.send_json({"success": False, "status": "error", "error": str(e)}, status=400)
+            return
+
+        # ── Create New Directory on Host ──
+        if path == "/api/create_folder":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len)
+            try:
+                data = json.loads(body.decode("utf-8"))
+                parent = data.get("parent", "").strip()
+                name = data.get("name", "").strip()
+                if not parent or not name:
+                    full_p = os.path.abspath(data.get("path", "").strip())
+                else:
+                    full_p = os.path.abspath(os.path.join(parent, name))
+
+                os.makedirs(full_p, exist_ok=True)
+                self.send_json({"success": True, "status": "ok", "path": full_p})
+            except Exception as e:
+                self.send_json({"success": False, "status": "error", "error": str(e)}, status=400)
+            return
+
+        # ── Trigger Native Picker (POST) ──
+        if path == "/api/pick_folder":
+            chosen, err = pick_folder_powershell()
+            if chosen:
+                self.send_json({"success": True, "status": "ok", "path": chosen})
+            else:
+                self.send_json({"success": False, "status": "cancelled", "error": err or "cancelled"})
+            return
+
+        # ── Open in OS (POST) ──
+        if path == "/api/open_folder":
+            content_len = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
+            try:
+                data = json.loads(body.decode("utf-8")) if body else {}
+            except Exception:
+                data = {}
+            target_type = data.get("target") or data.get("type") or qs.get("type", ["recv"])[0]
+            with STATE_LOCK:
+                target_dir = HOST_SHARE if target_type == "share" else UPLOAD_DIR
+            client_ip = self.client_address[0]
+            res = open_in_os_explorer(target_dir, client_ip)
+            self.send_json(res)
             return
 
         self.send_response(404)
         self.end_headers()
 
     def log_message(self, *_):
+        # Suppress noisy standard HTTP access logs
         pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  APPLICATION BOOTSTRAP
+#  APPLICATION BOOTSTRAP & SERVER LAUNCHER
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
     global UPLOAD_DIR, SERVER_PORT
 
     default_dir = r"D:\EthernetTransfers" if os.path.exists("D:\\") else os.path.join(
-        os.path.expanduser("~"), "Downloads", "EthernetTransfers")
+        os.path.expanduser("~"), "Downloads", "EthernetTransfers"
+    )
 
     if len(sys.argv) > 1:
         chosen = sys.argv[1].strip().strip("'\"")
@@ -1775,15 +3495,15 @@ def main():
 
     ifaces = get_network_interfaces()
     primary = next((f"http://{i['ip']}:{SERVER_PORT}" for i in ifaces
-                    if "wifi" in i["kind"] or "ethernet" in i["kind"]), None)
+                    if i["kind"] in ("wifi", "ethernet", "ethernet-direct", "hotspot")), None)
 
-    print("-" * 64)
+    print("=" * 68)
     print("  TurboShare &mdash; High-Speed Cross-Device Transfer Hub")
-    print("-" * 64)
+    print("=" * 68)
     print(f"  Storage Target : {UPLOAD_DIR}")
     for i in ifaces:
         print(f"  {i['label']:<24} -> http://{i['ip']}:{SERVER_PORT}")
-    print("-" * 64)
+    print("=" * 68)
 
     if qrcode and primary:
         try:
@@ -1793,11 +3513,14 @@ def main():
         except Exception:
             pass
 
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), TurboShareHandler)
+    server.daemon_threads = True
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutdown.")
+        print("\nTurboShare server stopped cleanly.")
 
 
 if __name__ == "__main__":
