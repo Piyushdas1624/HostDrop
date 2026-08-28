@@ -7,10 +7,10 @@ import shutil
 import zipfile
 import mimetypes
 import urllib.parse
-import html
+import html as html_module
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
-# ── UTF-8 console on Windows ──────────────────────────────────────────────────
+# ── UTF-8 console ─────────────────────────────────────────────────────────────
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -18,7 +18,6 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-# ── Optional libraries ─────────────────────────────────────────────────────────
 try:
     import psutil
 except ImportError:
@@ -29,19 +28,14 @@ try:
 except ImportError:
     qrcode = None
 
-# ── Globals set at runtime ────────────────────────────────────────────────────
-UPLOAD_DIR   = ""   # where friends upload TO  (receive dir)
-HOST_SHARE   = ""   # folder HOST shares FROM  (browse/download dir)
-SERVER_PORT  = 8080
+UPLOAD_DIR  = ""
+HOST_SHARE  = ""
+SERVER_PORT = 8080
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  NETWORK HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
 def get_network_interfaces():
     interfaces = []
     seen = set()
-
     if psutil:
         try:
             for name, addrs in psutil.net_if_addrs().items():
@@ -53,32 +47,28 @@ def get_network_interfaces():
                         seen.add(ip)
                         lo = name.lower()
                         if "vethernet" in lo or "switch" in lo or "wsl" in lo or "hyper" in lo:
-                            cat, icon, pri = "Virtual / WSL", "💻", 9
-                        elif "wi-fi" in lo or "wireless" in lo or "wlan" in lo:
-                            cat, icon, pri = "Wi-Fi", "📶", 1
+                            cat, pri = "Virtual / WSL", 9
                         elif ip.startswith("192.168.137."):
-                            cat, icon, pri = "Mobile Hotspot", "📡", 2
-                        elif "hotspot" in lo or "host" in lo:
-                            cat, icon, pri = "Mobile Hotspot", "📡", 2
+                            cat, pri = "Mobile Hotspot", 2
+                        elif "wi-fi" in lo or "wireless" in lo or "wlan" in lo:
+                            cat, pri = "Wi-Fi", 1
                         elif "ethernet" in lo or "eth" in lo:
-                            cat, icon, pri = ("Direct Ethernet (Cable)", "🔌", 3) if ip.startswith("169.254.") else ("Wired Ethernet", "🔌", 3)
+                            cat, pri = "Direct Ethernet", 3 if ip.startswith("169.254.") else 3
                         elif "bluetooth" in lo:
-                            cat, icon, pri = "Bluetooth PAN", "🔵", 10
+                            cat, pri = "Bluetooth", 10
                         else:
-                            cat, icon, pri = "LAN", "🌐", 8
-                        interfaces.append(dict(ip=ip, name=name, category=cat, icon=icon, priority=pri))
+                            cat, pri = "LAN", 8
+                        interfaces.append(dict(ip=ip, name=name, category=cat, priority=pri))
         except Exception:
             pass
-
     if not interfaces:
         try:
             for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
                 if not ip.startswith("127.") and ip not in seen:
-                    interfaces.append(dict(ip=ip, name="Network", category="Wi-Fi / LAN", icon="🌐", priority=5))
+                    interfaces.append(dict(ip=ip, name="Network", category="LAN", priority=5))
                     seen.add(ip)
         except Exception:
             pass
-
     interfaces.sort(key=lambda x: x["priority"])
     return interfaces
 
@@ -86,592 +76,595 @@ def get_network_interfaces():
 def disk_info(path):
     try:
         total, used, free = shutil.disk_usage(path)
-        return dict(free_gb=f"{free/1024**3:.1f}", total_gb=f"{total/1024**3:.1f}",
-                    pct=int(used*100//total))
+        return dict(free_gb=f"{free/1024**3:.1f}", total_gb=f"{total/1024**3:.1f}", pct=int(used*100//total))
     except Exception:
         return dict(free_gb="?", total_gb="?", pct=0)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HTML PAGE
-# ═══════════════════════════════════════════════════════════════════════════════
 def render_page(port):
-    ifaces   = get_network_interfaces()
-    recv_di  = disk_info(UPLOAD_DIR)
+    ifaces  = get_network_interfaces()
+    recv_di = disk_info(UPLOAD_DIR)
     share_di = disk_info(HOST_SHARE) if HOST_SHARE else {}
 
-    # build network pills
-    pills = []
+    # Build network rows
+    net_rows = []
     for i in ifaces:
         url = f"http://{i['ip']}:{port}"
-        pills.append(f"""
-<div class="pill">
-  <div class="pill-left">
-    <span class="pill-icon">{i['icon']}</span>
-    <div>
-      <div class="pill-cat">{i['category']}</div>
-      <div class="pill-url">{url}</div>
-    </div>
-  </div>
-  <div class="pill-actions">
-    <button class="btn-xs" onclick="copyText('{url}')">Copy</button>
-    <button class="btn-xs" onclick="showQR('{url}')">QR</button>
-  </div>
-</div>""")
+        net_rows.append(
+            f'<div class="net-row">'
+            f'<span class="net-cat">{html_module.escape(i["category"])}</span>'
+            f'<span class="net-url" id="url-{i["ip"]}">{html_module.escape(url)}</span>'
+            f'<button class="act-btn" onclick="copyText(\'{url}\')">copy</button>'
+            f'<button class="act-btn" onclick="showQR(\'{url}\')">qr</button>'
+            f'</div>'
+        )
 
-    share_dir_text = html.escape(HOST_SHARE) if HOST_SHARE else "No folder selected"
-    recv_dir_text  = html.escape(UPLOAD_DIR)
-
-    # QR modal per-interface buttons (precomputed to avoid f-string quoting issues)
+    # QR modal buttons
     qr_btns = "".join(
-        f'<button class="btn btn-ghost btn-sm" onclick="showQR(\'http://{i["ip"]}:{port}\')">'
-        f'{i["icon"]} {i["category"]}</button>'
+        f'<button class="qr-opt" onclick="showQR(\'http://{i["ip"]}:{port}\')">'
+        f'{html_module.escape(i["category"])}</button>'
         for i in ifaces
     )
+
+    share_path_text = html_module.escape(HOST_SHARE) if HOST_SHARE else ""
+    recv_path_text  = html_module.escape(UPLOAD_DIR)
+    share_badge_class = "" if HOST_SHARE else " empty"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5">
-<title>⚡ TurboShare</title>
+<title>TurboShare</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-/* ── Reset & tokens ─────────────────────────────── */
-*, *::before, *::after {{ box-sizing: border-box; margin:0; padding:0; }}
+/* ── Tokens ─────────────────────────────────────────────────────────── */
 :root {{
-  --bg:        #080c14;
-  --surface:   #0e1520;
-  --surface2:  #141d2b;
-  --border:    rgba(255,255,255,.07);
-  --border-hi: rgba(56,189,248,.35);
-  --text:      #e2e8f0;
-  --muted:     #64748b;
-  --dim:       #334155;
-  --cyan:      #38bdf8;
-  --cyan-dark: #0284c7;
-  --green:     #10b981;
-  --amber:     #f59e0b;
-  --red:       #f43f5e;
-  --r:         12px;
-  --r-lg:      18px;
-  --shadow:    0 8px 24px rgba(0,0,0,.5);
+  --ink:      #f0ede6;
+  --ink-dim:  #8b8680;
+  --ink-sub:  #5a5752;
+  --surface:  #17140f;
+  --surface2: #1f1c16;
+  --surface3: #26221b;
+  --border:   rgba(240,237,230,.08);
+  --border-hi:rgba(240,237,230,.18);
+  --lime:     #a3e635;
+  --lime-dim: rgba(163,230,53,.18);
+  --amber:    #d4a843;
+  --red:      #e05252;
+  --r:        6px;
 }}
-body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-        background:var(--bg); color:var(--text);
-        min-height:100dvh; display:flex; flex-direction:column; }}
-
-/* ── Utility ────────────────────────────────────── */
-.sr-only {{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }}
+*,*::before,*::after {{ box-sizing:border-box; margin:0; padding:0; }}
+html {{ background:var(--surface); color:var(--ink); }}
+body {{
+  font-family:'Space Grotesk',system-ui,sans-serif;
+  background:var(--surface);
+  min-height:100dvh;
+  display:grid;
+  grid-template-rows:auto 1fr auto;
+  font-size:14px;
+  line-height:1.5;
+}}
 a {{ color:inherit; text-decoration:none; }}
-code {{ font-family:ui-monospace,monospace; font-size:.85em; color:var(--cyan);
-        background:rgba(56,189,248,.1); padding:2px 6px; border-radius:4px; }}
-
-/* ── Buttons ────────────────────────────────────── */
-.btn {{
-  display:inline-flex; align-items:center; gap:6px; cursor:pointer;
-  border:1px solid transparent; border-radius:var(--r); font-weight:600;
-  transition:all .15s ease; text-decoration:none; white-space:nowrap;
-  padding:9px 16px; font-size:13px; min-height:38px;
-  background:var(--cyan-dark); color:#fff;
+code, .mono {{
+  font-family:'Geist Mono',ui-monospace,monospace;
+  font-size:.82em;
+  color:var(--ink-dim);
 }}
-.btn:hover {{ background:#0369a1; transform:translateY(-1px); }}
-.btn:active {{ transform:translateY(0); }}
-.btn-ghost {{ background:rgba(255,255,255,.05); border-color:var(--border); color:var(--text); }}
-.btn-ghost:hover {{ background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.15); }}
-.btn-sm {{ padding:6px 12px; font-size:12px; min-height:32px; }}
-.btn-danger {{ background:rgba(244,63,94,.15); color:var(--red); border-color:rgba(244,63,94,.3); }}
-.btn-danger:hover {{ background:rgba(244,63,94,.25); }}
-.btn-xs {{
-  padding:4px 10px; font-size:11px; font-weight:600; border-radius:6px;
-  background:rgba(255,255,255,.06); border:1px solid var(--border);
-  color:var(--text); cursor:pointer; min-height:26px;
-  transition:background .15s;
-}}
-.btn-xs:hover {{ background:rgba(255,255,255,.12); }}
 
-/* ── Navbar ─────────────────────────────────────── */
-.navbar {{
-  position:sticky; top:0; z-index:200;
-  background:rgba(8,12,20,.88);
-  backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+/* ── Layout ──────────────────────────────────────────────────────────── */
+.wrap {{ max-width:960px; margin:0 auto; padding:0 20px; width:100%; }}
+
+/* ── Header ──────────────────────────────────────────────────────────── */
+header {{
   border-bottom:1px solid var(--border);
-  padding:10px 20px;
-  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:14px 0;
+  position:sticky; top:0; z-index:200;
+  background:rgba(23,20,15,.92);
+  backdrop-filter:blur(12px);
 }}
-.brand {{ display:flex; align-items:center; gap:10px; }}
-.brand-mark {{
-  width:34px; height:34px; border-radius:10px;
-  background:linear-gradient(135deg,#0284c7,#38bdf8);
-  display:flex; align-items:center; justify-content:center; font-size:17px;
-  box-shadow:0 4px 16px rgba(14,165,233,.3);
-  flex-shrink:0;
+.header-inner {{
+  display:flex; align-items:center; justify-content:space-between; gap:16px;
 }}
-.brand-name {{ font-size:16px; font-weight:700; letter-spacing:-.02em; }}
-.brand-status {{
-  font-size:10px; font-weight:600; color:var(--green);
-  display:flex; align-items:center; gap:4px;
+.wordmark {{
+  font-size:15px; font-weight:600; letter-spacing:-.02em;
+  display:flex; align-items:center; gap:8px;
 }}
-.brand-status::before {{
-  content:""; width:5px; height:5px; background:var(--green);
-  border-radius:50%; box-shadow:0 0 6px var(--green);
+.status-dot {{
+  width:6px; height:6px; border-radius:50%;
+  background:var(--lime); box-shadow:0 0 8px var(--lime);
 }}
-.nav-right {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
+.header-meta {{ font-size:12px; color:var(--ink-sub); font-family:'Geist Mono',monospace; }}
+.nav-acts {{ display:flex; gap:6px; }}
 
-/* ── Layout ─────────────────────────────────────── */
-.main {{ max-width:1080px; width:100%; margin:0 auto; padding:20px; flex:1;
-         display:flex; flex-direction:column; gap:16px; }}
-
-/* ── Cards ──────────────────────────────────────── */
-.card {{
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--r-lg); overflow:hidden;
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+.btn {{
+  display:inline-flex; align-items:center; gap:6px;
+  padding:7px 14px; border-radius:var(--r);
+  font-size:13px; font-weight:500; font-family:inherit;
+  cursor:pointer; border:1px solid var(--border-hi);
+  background:var(--surface3); color:var(--ink);
+  transition:background .12s, border-color .12s, transform .1s;
+  white-space:nowrap; min-height:34px;
 }}
-.card-head {{
-  padding:14px 18px; border-bottom:1px solid var(--border);
+.btn:hover {{ background:var(--surface2); border-color:rgba(240,237,230,.28); }}
+.btn:active {{ transform:scale(.98); }}
+.btn-lime {{
+  background:var(--lime); color:#0a0a00;
+  border-color:transparent; font-weight:600;
+  box-shadow:0 0 16px rgba(163,230,53,.25);
+}}
+.btn-lime:hover {{ background:#b5f032; border-color:transparent; }}
+.act-btn {{
+  padding:3px 9px; border-radius:4px;
+  font-size:11px; font-weight:500; font-family:'Geist Mono',monospace;
+  letter-spacing:.04em; cursor:pointer;
+  background:var(--surface3); border:1px solid var(--border);
+  color:var(--ink-dim); transition:all .12s; min-height:24px;
+}}
+.act-btn:hover {{ color:var(--ink); border-color:var(--border-hi); }}
+
+/* ── Main ─────────────────────────────────────────────────────────────── */
+main {{ padding:28px 0; display:flex; flex-direction:column; gap:20px; }}
+
+/* ── Section label ───────────────────────────────────────────────────── */
+.sec-label {{
+  font-size:10px; font-weight:600; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--ink-sub);
+  margin-bottom:12px;
+}}
+
+/* ── Network panel ────────────────────────────────────────────────────── */
+.net-panel {{
+  background:var(--surface2); border:1px solid var(--border);
+  border-radius:var(--r); overflow:hidden;
+}}
+.net-head {{
+  padding:11px 16px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
-  flex-wrap:wrap; gap:10px;
-  background:rgba(255,255,255,.02);
 }}
-.card-title {{ font-size:12px; font-weight:700; text-transform:uppercase;
-               letter-spacing:.06em; color:var(--muted);
-               display:flex; align-items:center; gap:7px; }}
-.card-body {{ padding:16px 18px; }}
+.net-body {{ padding:4px 0; }}
+.net-row {{
+  display:flex; align-items:center; gap:10px;
+  padding:9px 16px; border-bottom:1px solid var(--border);
+  transition:background .1s;
+}}
+.net-row:last-child {{ border-bottom:none; }}
+.net-row:hover {{ background:rgba(240,237,230,.02); }}
+.net-cat {{
+  font-size:11px; color:var(--ink-sub); min-width:130px;
+  font-weight:500; letter-spacing:.03em;
+}}
+.net-url {{
+  font-family:'Geist Mono',monospace; font-size:12px;
+  color:var(--ink-dim); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}}
+.net-row:hover .net-url {{ color:var(--ink); }}
 
-/* ── The dual-panel hero ────────────────────────── */
-.dual-panel {{
+/* ── Two-column action zone ───────────────────────────────────────────── */
+.action-grid {{
   display:grid; grid-template-columns:1fr 1fr; gap:16px;
 }}
-@media (max-width:700px) {{ .dual-panel {{ grid-template-columns:1fr; }} }}
+@media(max-width:640px) {{ .action-grid {{ grid-template-columns:1fr; }} }}
 
-.panel {{
+.zone {{
   background:var(--surface2); border:1px solid var(--border);
-  border-radius:var(--r-lg); padding:20px;
+  border-radius:var(--r); padding:20px;
   display:flex; flex-direction:column; gap:14px;
-  transition:border-color .2s;
 }}
-.panel:focus-within, .panel:hover {{ border-color:var(--border-hi); }}
-.panel-label {{
-  font-size:11px; font-weight:700; text-transform:uppercase;
-  letter-spacing:.07em; color:var(--muted);
-  display:flex; align-items:center; gap:6px;
-}}
-.panel-heading {{ font-size:17px; font-weight:700; line-height:1.25; }}
-.panel-sub {{ font-size:12px; color:var(--muted); line-height:1.5; }}
+.zone-title {{ font-size:15px; font-weight:600; letter-spacing:-.015em; }}
+.zone-sub {{ font-size:12px; color:var(--ink-dim); line-height:1.55; }}
+.zone-share {{ border-color:rgba(212,168,67,.25); }}
+.zone-recv  {{ border-color:rgba(163,230,53,.15); }}
 
-/* HOST SHARE panel */
-.panel-share .panel-label {{ color:#a78bfa; }}
-.panel-share {{ border-color:rgba(167,139,250,.2); }}
-.panel-share:hover {{ border-color:rgba(167,139,250,.5); }}
-
-/* Share folder display */
-.folder-badge {{
-  background:rgba(167,139,250,.1); border:1px solid rgba(167,139,250,.25);
-  border-radius:8px; padding:10px 14px;
-  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+/* Folder display */
+.folder-row {{
+  display:flex; align-items:center; gap:8px;
+  background:var(--surface3); border:1px solid var(--border);
+  border-radius:var(--r); padding:9px 12px;
+  min-height:40px;
 }}
 .folder-path {{
-  font-size:12px; font-family:monospace; color:#c4b5fd;
-  word-break:break-all; flex:1;
+  font-family:'Geist Mono',monospace; font-size:12px;
+  color:var(--amber); flex:1; word-break:break-all;
 }}
-.folder-empty {{ color:var(--muted); font-style:italic; }}
+.folder-empty {{ color:var(--ink-sub); font-style:normal; }}
 
-/* Upload/receive panel */
-.panel-recv .panel-label {{ color:var(--cyan); }}
-.panel-recv {{ border-color:rgba(56,189,248,.15); }}
-
-/* Drop zone inside recv panel */
-.drop-inner {{
-  border:2px dashed rgba(56,189,248,.3); border-radius:10px;
-  padding:24px 16px; text-align:center; cursor:pointer;
-  transition:all .2s; background:rgba(56,189,248,.03);
-  flex:1; display:flex; flex-direction:column;
-  align-items:center; justify-content:center; gap:10px;
-  min-height:120px;
+/* Drop zone */
+.drop-zone {{
+  border:1px dashed var(--border-hi); border-radius:var(--r);
+  padding:28px 16px; text-align:center; cursor:pointer;
+  transition:all .15s; flex:1; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:8px;
+  min-height:110px; position:relative; overflow:hidden;
 }}
-.drop-inner:hover, .drop-inner.over {{
-  border-color:var(--cyan);
-  background:rgba(56,189,248,.08);
+.drop-zone:hover, .drop-zone.over {{
+  background:rgba(163,230,53,.04); border-color:var(--lime);
 }}
-.drop-inner svg {{ fill:var(--cyan); width:40px; height:40px;
-                   filter:drop-shadow(0 3px 8px rgba(56,189,248,.3)); }}
-.drop-text {{ font-size:14px; font-weight:600; }}
-.drop-sub  {{ font-size:12px; color:var(--muted); }}
+.drop-icon {{
+  width:32px; height:32px; stroke:var(--lime); fill:none;
+  stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round;
+}}
+.drop-label {{ font-size:13px; font-weight:500; color:var(--ink); }}
+.drop-sub {{ font-size:11px; color:var(--ink-sub); }}
 .btn-row {{ display:flex; gap:8px; justify-content:center; flex-wrap:wrap; }}
-.recv-dest {{ font-size:12px; color:var(--muted); font-family:monospace; word-break:break-all; }}
+.recv-meta {{ font-size:11px; color:var(--ink-sub); font-family:'Geist Mono',monospace; }}
 
-/* ── Progress ────────────────────────────────────── */
-.progress-card {{
+/* ── Progress ──────────────────────────────────────────────────────────── */
+.progress-zone {{
   display:none;
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--r-lg); padding:18px;
+  background:var(--surface2); border:1px solid var(--border);
+  border-radius:var(--r); padding:16px;
+  gap:10px; flex-direction:column;
 }}
 .progress-track {{
-  background:rgba(255,255,255,.06); border-radius:8px;
-  height:12px; overflow:hidden; margin-bottom:10px;
+  background:var(--surface3); border-radius:3px; height:3px; overflow:hidden;
 }}
 .progress-fill {{
-  background:linear-gradient(90deg,#0284c7,#38bdf8);
-  height:100%; width:0; transition:width .1s linear;
-  box-shadow:0 0 10px rgba(56,189,248,.5);
+  background:var(--lime); height:100%; width:0;
+  transition:width .08s linear;
+  box-shadow:0 0 8px rgba(163,230,53,.5);
 }}
-.progress-meta {{ display:flex; justify-content:space-between; font-size:12px; color:var(--muted); flex-wrap:wrap; gap:8px; }}
-.progress-file {{ margin-top:6px; font-size:11px; color:var(--cyan); font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-
-/* ── Network pills ───────────────────────────────── */
-.pills-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px; }}
-.pill {{
-  background:rgba(255,255,255,.025); border:1px solid var(--border);
-  border-radius:10px; padding:12px 14px;
-  display:flex; align-items:center; justify-content:space-between; gap:10px;
-  transition:all .15s;
+.progress-row {{
+  display:flex; justify-content:space-between; align-items:center;
+  font-size:12px; gap:8px; flex-wrap:wrap;
 }}
-.pill:hover {{ background:rgba(255,255,255,.05); border-color:rgba(56,189,248,.35); }}
-.pill-left {{ display:flex; align-items:center; gap:10px; overflow:hidden; }}
-.pill-icon {{ font-size:20px; flex-shrink:0; }}
-.pill-cat  {{ font-size:12px; font-weight:600; color:var(--cyan); }}
-.pill-url  {{ font-size:11px; font-family:monospace; color:var(--text); opacity:.7; }}
-.pill-actions {{ display:flex; gap:6px; flex-shrink:0; }}
+.progress-status {{ color:var(--ink-dim); }}
+.progress-speed {{ font-family:'Geist Mono',monospace; color:var(--lime); font-weight:500; }}
+.progress-file {{
+  font-size:11px; font-family:'Geist Mono',monospace;
+  color:var(--ink-sub); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}}
 
-/* ── File Explorer ───────────────────────────────── */
+/* ── Explorer ──────────────────────────────────────────────────────────── */
+.explorer {{
+  background:var(--surface2); border:1px solid var(--border);
+  border-radius:var(--r); overflow:hidden;
+}}
 .explorer-tabs {{
-  display:flex; gap:2px; padding:12px 18px 0;
-  border-bottom:1px solid var(--border);
+  display:flex; border-bottom:1px solid var(--border);
+  background:var(--surface3);
 }}
 .tab {{
-  padding:8px 16px; font-size:13px; font-weight:600; cursor:pointer;
-  border-radius:8px 8px 0 0; color:var(--muted);
-  border:1px solid transparent; border-bottom:none;
-  transition:all .15s; background:none;
+  padding:10px 18px; font-size:12px; font-weight:500; cursor:pointer;
+  color:var(--ink-sub); border:none; background:none; border-bottom:2px solid transparent;
+  transition:color .12s,border-color .12s; font-family:inherit; letter-spacing:.01em;
 }}
-.tab.active {{
-  background:var(--surface2); color:var(--text);
-  border-color:var(--border); border-bottom-color:var(--surface2);
+.tab.active {{ color:var(--ink); border-bottom-color:var(--lime); }}
+.tab:hover:not(.active) {{ color:var(--ink-dim); }}
+.tab-badge {{
+  display:inline-block; font-size:9px; font-weight:600;
+  padding:2px 5px; border-radius:3px; margin-left:5px;
+  background:var(--lime-dim); color:var(--lime); vertical-align:middle;
 }}
-.tab:hover:not(.active) {{ color:var(--text); }}
+.tab-badge.off {{
+  background:rgba(240,237,230,.06); color:var(--ink-sub);
+}}
 .tab-panel {{ display:none; }}
 .tab-panel.active {{ display:block; }}
 
 .explorer-toolbar {{
-  padding:12px 18px; border-bottom:1px solid var(--border);
+  padding:10px 16px; border-bottom:1px solid var(--border);
   display:flex; align-items:center; justify-content:space-between;
-  flex-wrap:wrap; gap:10px; background:rgba(255,255,255,.015);
+  flex-wrap:wrap; gap:8px; background:rgba(0,0,0,.15);
 }}
-.breadcrumbs {{ font-size:13px; color:var(--muted); display:flex; gap:5px; align-items:center; flex-wrap:wrap; }}
-.breadcrumbs a {{ color:var(--cyan); cursor:pointer; font-weight:500; }}
-.breadcrumbs a:hover {{ text-decoration:underline; }}
+.breadcrumb {{
+  font-size:12px; font-family:'Geist Mono',monospace;
+  color:var(--ink-sub); display:flex; gap:4px; align-items:center; flex-wrap:wrap;
+}}
+.breadcrumb a {{ color:var(--ink-dim); cursor:pointer; }}
+.breadcrumb a:hover {{ color:var(--ink); text-decoration:underline; }}
+.breadcrumb span {{ color:var(--ink-sub); }}
+.tool-acts {{ display:flex; gap:6px; }}
+
 .table-wrap {{ overflow-x:auto; }}
 table {{ width:100%; border-collapse:collapse; }}
-th {{ padding:11px 18px; font-size:11px; color:var(--dim); text-transform:uppercase;
-      letter-spacing:.05em; border-bottom:1px solid var(--border); text-align:left; }}
-td {{ padding:12px 18px; font-size:13px; border-bottom:1px solid rgba(255,255,255,.03); vertical-align:middle; }}
-tr:hover {{ background:rgba(255,255,255,.03); }}
-.file-link {{ display:flex; align-items:center; gap:9px; font-weight:500; color:var(--text); cursor:pointer; }}
-.file-link:hover {{ color:var(--cyan); }}
-.folder-link {{ color:#facc15; }}
-.sz {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
-.acts {{ text-align:right; white-space:nowrap; }}
-
-/* ── Status bar ─────────────────────────────────── */
-.statusbar {{
-  font-size:11px; color:var(--muted); padding:10px 20px;
-  border-top:1px solid var(--border); display:flex; gap:16px;
-  flex-wrap:wrap; align-items:center;
+th {{
+  padding:9px 16px; font-size:10px; font-weight:600;
+  letter-spacing:.08em; text-transform:uppercase;
+  color:var(--ink-sub); border-bottom:1px solid var(--border);
+  text-align:left; background:rgba(0,0,0,.1);
 }}
-.status-dot {{ width:6px; height:6px; background:var(--green); border-radius:50%;
-               box-shadow:0 0 6px var(--green); display:inline-block; }}
+td {{ padding:11px 16px; font-size:13px; border-bottom:1px solid var(--border); vertical-align:middle; }}
+tr:last-child td {{ border-bottom:none; }}
+tr:hover td {{ background:rgba(240,237,230,.02); }}
+.file-name {{
+  display:flex; align-items:center; gap:8px; cursor:pointer;
+  font-weight:500; color:var(--ink);
+}}
+.file-name:hover {{ color:var(--lime); }}
+.dir-name {{ color:var(--amber); }}
+.dir-name:hover {{ color:#e8bc56; }}
+.file-sz {{ font-family:'Geist Mono',monospace; font-size:11px; color:var(--ink-sub); white-space:nowrap; }}
+.td-act {{ text-align:right; white-space:nowrap; }}
+.empty-state {{
+  padding:36px 16px; text-align:center; color:var(--ink-sub);
+  font-size:12px; line-height:1.8;
+}}
 
-/* ── QR & Modals ─────────────────────────────────── */
+/* ── Footer ────────────────────────────────────────────────────────────── */
+footer {{
+  border-top:1px solid var(--border); padding:12px 0;
+  font-size:11px; color:var(--ink-sub); font-family:'Geist Mono',monospace;
+}}
+.footer-inner {{
+  display:flex; gap:20px; flex-wrap:wrap; align-items:center;
+}}
+
+/* ── QR overlay ────────────────────────────────────────────────────────── */
 .overlay {{
-  position:fixed; inset:0; background:rgba(0,0,0,.75);
-  backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
+  position:fixed; inset:0;
+  background:rgba(10,8,5,.85); backdrop-filter:blur(8px);
   z-index:500; display:none; align-items:center; justify-content:center; padding:20px;
 }}
 .overlay.open {{ display:flex; }}
 .modal {{
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:var(--r-lg); padding:24px; max-width:520px; width:100%;
-  box-shadow:var(--shadow); max-height:88vh; overflow-y:auto;
+  background:var(--surface2); border:1px solid var(--border-hi);
+  border-radius:10px; padding:24px; max-width:420px; width:100%;
+  box-shadow:0 24px 48px rgba(0,0,0,.6);
+  max-height:90vh; overflow-y:auto;
 }}
 .modal-head {{
   display:flex; align-items:center; justify-content:space-between; margin-bottom:18px;
 }}
-.modal-title {{ font-size:17px; font-weight:700; }}
-.modal-close {{ background:none; border:none; color:var(--muted); font-size:22px;
-                cursor:pointer; padding:4px 8px; border-radius:6px; }}
-.modal-close:hover {{ color:var(--text); background:rgba(255,255,255,.07); }}
+.modal-title {{ font-size:16px; font-weight:600; }}
+.close-btn {{
+  background:none; border:none; color:var(--ink-sub);
+  font-size:20px; cursor:pointer; padding:2px 6px; border-radius:4px;
+}}
+.close-btn:hover {{ color:var(--ink); background:var(--surface3); }}
+.qr-wrap {{
+  background:#fff; padding:14px; border-radius:8px;
+  display:flex; align-items:center; justify-content:center; margin-bottom:12px;
+}}
+.qr-wrap img {{ width:180px; height:180px; display:block; }}
+.qr-url {{ font-family:'Geist Mono',monospace; font-size:11px; color:var(--ink-dim); text-align:center; margin-bottom:14px; word-break:break-all; }}
+.qr-opts {{ display:flex; gap:6px; flex-wrap:wrap; }}
+.qr-opt {{
+  padding:5px 10px; font-size:11px; font-weight:500;
+  background:var(--surface3); border:1px solid var(--border);
+  color:var(--ink-dim); cursor:pointer; border-radius:4px;
+  font-family:inherit; transition:all .12s;
+}}
+.qr-opt:hover {{ color:var(--ink); border-color:var(--border-hi); }}
 
-/* Trouble accordion */
-.acc-item {{ border:1px solid var(--border); border-radius:10px; margin-bottom:8px; overflow:hidden; }}
+/* ── Help accordion ────────────────────────────────────────────────────── */
+.acc {{ border:1px solid var(--border); border-radius:var(--r); margin-bottom:6px; overflow:hidden; }}
 .acc-q {{
-  padding:13px 16px; font-size:13px; font-weight:600;
+  padding:11px 14px; font-size:13px; font-weight:500;
   cursor:pointer; display:flex; justify-content:space-between; align-items:center;
+  background:none; border:none; width:100%; text-align:left; color:var(--ink); font-family:inherit;
 }}
-.acc-q:hover {{ background:rgba(255,255,255,.04); }}
-.acc-a {{ padding:0 16px; font-size:12px; color:var(--muted); line-height:1.7; display:none; }}
-.acc-a.open {{ display:block; padding-bottom:13px; }}
+.acc-q:hover {{ background:var(--surface3); }}
+.acc-a {{ display:none; padding:0 14px; font-size:12px; color:var(--ink-dim); line-height:1.7; }}
+.acc-a.open {{ display:block; padding-bottom:12px; }}
 .acc-a ul {{ margin:6px 0 0 16px; }}
+.acc-a li {{ margin-bottom:4px; }}
 
-/* ── Toast ───────────────────────────────────────── */
+/* ── Toast ─────────────────────────────────────────────────────────────── */
 .toast {{
-  position:fixed; bottom:24px; left:50%;
-  transform:translateX(-50%) translateY(80px);
-  background:var(--surface); color:var(--text);
-  padding:10px 20px; border-radius:10px;
-  border:1px solid var(--cyan); font-size:13px; font-weight:600;
-  box-shadow:var(--shadow); z-index:999;
-  transition:transform .3s cubic-bezier(.16,1,.3,1); pointer-events:none;
+  position:fixed; bottom:20px; right:20px;
+  background:var(--surface3); color:var(--ink);
+  padding:8px 14px; border-radius:var(--r);
+  border:1px solid var(--border-hi); font-size:12px; font-weight:500;
+  box-shadow:0 8px 24px rgba(0,0,0,.4);
+  opacity:0; transform:translateY(8px);
+  transition:opacity .2s, transform .2s; z-index:999;
+  pointer-events:none; font-family:'Geist Mono',monospace;
 }}
-.toast.show {{ transform:translateX(-50%) translateY(0); }}
+.toast.show {{ opacity:1; transform:translateY(0); }}
 
-/* ── Responsive ──────────────────────────────────── */
-@media (max-width:600px) {{
-  .main {{ padding:12px; gap:12px; }}
-  .card-body {{ padding:12px; }}
+@media(max-width:600px) {{
+  .wrap {{ padding:0 14px; }}
   th:nth-child(2), td:nth-child(2) {{ display:none; }}
+  .net-cat {{ min-width:90px; }}
 }}
 </style>
 </head>
 <body>
 
-<!-- ── Navbar ── -->
-<header class="navbar">
-  <div class="brand">
-    <div class="brand-mark">⚡</div>
-    <div>
-      <div class="brand-name">TurboShare</div>
-      <div class="brand-status">Live · Ready</div>
+<header>
+  <div class="wrap header-inner">
+    <div class="wordmark">
+      <span class="status-dot" title="Server running"></span>
+      TurboShare
+    </div>
+    <div class="header-meta mono">:{port}</div>
+    <div class="nav-acts">
+      <button class="btn" onclick="openModal('qrModal')">QR</button>
+      <button class="btn" onclick="openModal('helpModal')">Help</button>
     </div>
   </div>
-  <nav class="nav-right" aria-label="Navigation">
-    <button class="btn btn-ghost btn-sm" onclick="openQR()">📱 QR</button>
-    <button class="btn btn-ghost btn-sm" onclick="openModal('helpModal')">❓ Help</button>
-  </nav>
 </header>
 
-<main class="main">
+<main>
+<div class="wrap" style="display:flex;flex-direction:column;gap:20px">
 
-  <!-- ── Network links ── -->
-  <section class="card" aria-label="Connection links">
-    <div class="card-head">
-      <div class="card-title">📡 Connect From Any Device</div>
-      <span style="font-size:11px;color:var(--muted)">Open URL on phone, TV, console, or friend's PC</span>
-    </div>
-    <div class="card-body">
-      <div class="pills-grid">
-        {''.join(pills)}
+  <!-- Network -->
+  <section>
+    <div class="sec-label">Connect — open any URL on any device on your network</div>
+    <div class="net-panel">
+      <div class="net-head">
+        <span class="mono" style="font-size:12px;color:var(--ink-sub)">http://&lt;address&gt;:{port}</span>
+        <span style="font-size:11px;color:var(--ink-sub)">Share these with your friend</span>
+      </div>
+      <div class="net-body">
+        {''.join(net_rows)}
       </div>
     </div>
   </section>
 
-  <!-- ── Two-panel sharing hub ── -->
-  <div class="dual-panel">
+  <!-- Action zones -->
+  <section>
+    <div class="sec-label">Transfer</div>
+    <div class="action-grid">
 
-    <!-- HOST: choose folder to share -->
-    <div class="panel panel-share" role="region" aria-label="Host share folder">
-      <div class="panel-label">🟣 You are Sharing (Host)</div>
-      <div>
-        <div class="panel-heading">Pick a folder to share</div>
-        <div class="panel-sub">Friends can browse &amp; download everything inside this folder — no USB, no cloud needed.</div>
+      <!-- Share zone -->
+      <div class="zone zone-share">
+        <div>
+          <div class="zone-title">Share from this PC</div>
+          <div class="zone-sub" style="margin-top:4px">Pick a folder. Anyone with the URL can browse and download it — no install needed.</div>
+        </div>
+        <div class="folder-row" id="shareFolderRow">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="1.5" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span class="folder-path {'' if HOST_SHARE else 'folder-empty'}" id="shareFolderPath">
+            {share_path_text if HOST_SHARE else 'no folder selected'}
+          </span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="chooseShareFolder()" style="border-color:rgba(212,168,67,.4);color:var(--amber)">
+            choose folder
+          </button>
+          {'<button class="btn" onclick="clearShare()" style="color:var(--red);border-color:rgba(224,82,82,.3)">clear</button>' if HOST_SHARE else ''}
+        </div>
+        {'<div class="recv-meta">' + share_di.get("free_gb","?") + ' GB free</div>' if HOST_SHARE else ''}
       </div>
 
-      <div class="folder-badge" id="shareFolderBadge">
-        <span style="font-size:20px">📁</span>
-        <span class="folder-path {'folder-empty' if not HOST_SHARE else ''}" id="shareFolderPath">
-          {share_dir_text if HOST_SHARE else 'No folder selected yet'}
-        </span>
+      <!-- Receive zone -->
+      <div class="zone zone-recv">
+        <div>
+          <div class="zone-title">Receive files</div>
+          <div class="zone-sub" style="margin-top:4px">Drop files or folders here. Large files resume automatically if interrupted.</div>
+        </div>
+        <div class="drop-zone" id="dropZone"
+             onclick="document.getElementById('fileInput').click()"
+             ondragover="onDragOver(event)" ondragleave="onDragLeave()" ondrop="onDrop(event)">
+          <svg class="drop-icon" viewBox="0 0 24 24">
+            <polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/>
+            <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
+          </svg>
+          <div class="drop-label">drop files or folders</div>
+          <div class="drop-sub">PC · phone · TV · console — anything with a browser</div>
+        </div>
+        <div class="btn-row">
+          <button class="btn" onclick="document.getElementById('fileInput').click()">files</button>
+          <button class="btn btn-lime" onclick="document.getElementById('folderInput').click()">folder</button>
+        </div>
+        <div class="recv-meta">saving to <span style="color:var(--lime)">{recv_path_text}</span> — {recv_di['free_gb']} GB free</div>
+        <input type="file" id="fileInput"   multiple style="display:none">
+        <input type="file" id="folderInput" webkitdirectory multiple style="display:none">
       </div>
-
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-sm" style="background:rgba(167,139,250,.2);color:#c4b5fd;border-color:rgba(167,139,250,.35);"
-                onclick="chooseShareFolder()">
-          📂 Choose Folder
-        </button>
-        {'<button class="btn btn-sm btn-danger" onclick="clearShareFolder()">✕ Clear</button>' if HOST_SHARE else ''}
-      </div>
-
-      {'<div style="font-size:11px;color:var(--muted)">💾 Drive space: <strong style=\'color:var(--text)\'>' + share_di.get('free_gb','?') + ' GB free</strong></div>' if HOST_SHARE else ''}
     </div>
+  </section>
 
-    <!-- RECEIVE: friends upload here -->
-    <div class="panel panel-recv" role="region" aria-label="Receive files">
-      <div class="panel-label">🔵 Receive Files</div>
-      <div>
-        <div class="panel-heading">Drop or pick files to send here</div>
-        <div class="panel-sub">Files land on this PC automatically. Auto-resumes if interrupted.</div>
-      </div>
-
-      <div class="drop-inner" id="dropZone"
-           onclick="document.getElementById('fileInput').click()"
-           ondragover="ev(event)" ondragleave="ev2()" ondrop="onDrop(event)">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35
-                   8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0
-                   5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
-        </svg>
-        <div class="drop-text">Drag &amp; Drop Files or Folders</div>
-        <div class="drop-sub">Works from PC, phone, TV, Xbox, PS5</div>
-      </div>
-
-      <div class="btn-row" onclick="event.stopPropagation()">
-        <button class="btn btn-sm btn-ghost" onclick="document.getElementById('fileInput').click()">📄 Files</button>
-        <button class="btn btn-sm"           onclick="document.getElementById('folderInput').click()">📁 Folder</button>
-      </div>
-      <div class="recv-dest">Saves to: <code>{recv_dir_text}</code></div>
-      <div style="font-size:11px;color:var(--muted)">💾 <strong style="color:var(--text)">{recv_di['free_gb']} GB</strong> free</div>
-
-      <input type="file" id="fileInput"   multiple style="display:none">
-      <input type="file" id="folderInput" webkitdirectory multiple style="display:none">
-    </div>
-
-  </div>
-
-  <!-- ── Progress ── -->
-  <div class="progress-card" id="progressCard">
+  <!-- Progress -->
+  <div class="progress-zone" id="progressZone">
     <div class="progress-track"><div class="progress-fill" id="pBar"></div></div>
-    <div class="progress-meta">
-      <span id="pStatus" style="color:var(--text)">Preparing…</span>
-      <span id="pSpeed" style="color:var(--cyan);font-weight:700">0 MB/s</span>
+    <div class="progress-row">
+      <span class="progress-status" id="pStatus">preparing…</span>
+      <span class="progress-speed" id="pSpeed">— MB/s</span>
     </div>
     <div class="progress-file" id="pFile"></div>
   </div>
 
-  <!-- ── File Explorer with tabs ── -->
-  <section class="card" aria-label="File browser">
+  <!-- File explorer -->
+  <section class="explorer">
     <div class="explorer-tabs">
-      <button class="tab active" onclick="switchTab('recv')" id="tab-recv">
-        📥 Received Files
+      <button class="tab active" id="tab-recv" onclick="switchTab('recv')">
+        received
+        <span class="tab-badge" id="badge-recv">live</span>
       </button>
-      <button class="tab" onclick="switchTab('share')" id="tab-share">
-        📤 Host Shared Folder {'<span style="background:var(--green);color:#000;font-size:9px;padding:1px 5px;border-radius:20px;margin-left:4px;font-weight:700">LIVE</span>' if HOST_SHARE else '<span style="background:var(--dim);color:var(--muted);font-size:9px;padding:1px 5px;border-radius:20px;margin-left:4px">NOT SET</span>'}
+      <button class="tab" id="tab-share" onclick="switchTab('share')">
+        shared folder
+        <span class="tab-badge {'off' if not HOST_SHARE else ''}" id="badge-share">{'not set' if not HOST_SHARE else 'live'}</span>
       </button>
     </div>
 
-    <!-- RECV tab -->
     <div class="tab-panel active" id="panel-recv">
       <div class="explorer-toolbar">
-        <div class="breadcrumbs" id="bc-recv"><span>📁 Received Root</span></div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-ghost btn-sm" onclick="loadDir('recv', recvPath, true)">↻ Refresh</button>
-          <a id="zip-recv" class="btn btn-sm" href="#">📦 ZIP</a>
+        <div class="breadcrumb" id="bc-recv">
+          <a onclick="loadDir('recv','',true)">root</a>
+        </div>
+        <div class="tool-acts">
+          <button class="act-btn" onclick="loadDir('recv',recvPath,true)">refresh</button>
+          <a id="zip-recv" class="act-btn" href="#">zip all</a>
         </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Size</th><th class="acts">Actions</th></tr></thead>
-          <tbody id="tbody-recv"><tr><td colspan="3" style="text-align:center;padding:32px;color:var(--muted)">Loading…</td></tr></tbody>
+          <thead><tr><th>Name</th><th>Size</th><th style="text-align:right">Actions</th></tr></thead>
+          <tbody id="tbody-recv"><tr><td colspan="3"><div class="empty-state">loading…</div></td></tr></tbody>
         </table>
       </div>
     </div>
 
-    <!-- SHARE tab -->
     <div class="tab-panel" id="panel-share">
       <div class="explorer-toolbar">
-        <div class="breadcrumbs" id="bc-share"><span>📁 Shared Root</span></div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-ghost btn-sm" onclick="loadDir('share', sharePath, true)">↻ Refresh</button>
-          <a id="zip-share" class="btn btn-sm" href="#">📦 ZIP</a>
+        <div class="breadcrumb" id="bc-share">
+          <a onclick="loadDir('share','',true)">root</a>
+        </div>
+        <div class="tool-acts">
+          <button class="act-btn" onclick="loadDir('share',sharePath,true)">refresh</button>
+          <a id="zip-share" class="act-btn" href="#">zip all</a>
         </div>
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Size</th><th class="acts">Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Size</th><th style="text-align:right">Actions</th></tr></thead>
           <tbody id="tbody-share">
-            <tr><td colspan="3" style="text-align:center;padding:32px;color:var(--muted)">
-              {'Select a folder to share to see files here.' if not HOST_SHARE else 'Loading…'}
-            </td></tr>
+            <tr><td colspan="3"><div class="empty-state">{'choose a folder to share on the left' if not HOST_SHARE else 'loading…'}</div></td></tr>
           </tbody>
         </table>
       </div>
     </div>
   </section>
+
+</div>
 </main>
 
-<!-- Status bar -->
-<footer class="statusbar">
-  <span><span class="status-dot"></span> Server live on port {port}</span>
-  <span>📥 Saving to: <code>{recv_dir_text}</code></span>
-  {'<span>📤 Sharing: <code>' + share_dir_text + '</code></span>' if HOST_SHARE else ''}
+<footer>
+  <div class="wrap footer-inner">
+    <span>port {port}</span>
+    <span>recv → <span style="color:var(--lime)">{recv_path_text}</span></span>
+    {'<span>share → <span style="color:var(--amber)">' + html_module.escape(HOST_SHARE) + '</span></span>' if HOST_SHARE else '<span style="color:var(--ink-sub)">share → not set</span>'}
+  </div>
 </footer>
 
-<!-- ── QR Modal ── -->
-<div class="overlay" id="qrModal" onclick="closeOverlay('qrModal')">
+<!-- QR Modal -->
+<div class="overlay" id="qrModal" onclick="closeModal('qrModal')">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-head">
-      <div class="modal-title">📱 Scan to Connect</div>
-      <button class="modal-close" onclick="closeOverlay('qrModal')" aria-label="Close">×</button>
+      <div class="modal-title">Scan to connect</div>
+      <button class="close-btn" onclick="closeModal('qrModal')">×</button>
     </div>
-    <p style="font-size:12px;color:var(--muted);margin-bottom:16px">Point your phone or TV camera at this code.</p>
-    <div style="text-align:center">
-      <div style="background:#fff;padding:16px;border-radius:14px;display:inline-block">
-        <img id="qrImg" src="" alt="QR code" style="width:200px;height:200px;display:block">
-      </div>
-      <p id="qrUrl" style="font-size:12px;color:var(--cyan);margin-top:12px;font-family:monospace"></p>
-    </div>
-    <div style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
-      {qr_btns}
-    </div>
+    <div class="qr-wrap"><img id="qrImg" src="" alt="QR code"></div>
+    <div class="qr-url" id="qrUrl"></div>
+    <div class="qr-opts">{qr_btns}</div>
   </div>
 </div>
 
-<!-- ── Help Modal ── -->
-<div class="overlay" id="helpModal" onclick="closeOverlay('helpModal')">
+<!-- Help Modal -->
+<div class="overlay" id="helpModal" onclick="closeModal('helpModal')">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-head">
-      <div class="modal-title">🛠️ Usage & Troubleshooting</div>
-      <button class="modal-close" onclick="closeOverlay('helpModal')" aria-label="Close">×</button>
+      <div class="modal-title">Troubleshooting</div>
+      <button class="close-btn" onclick="closeModal('helpModal')">×</button>
     </div>
 
-    <div class="acc-item">
-      <div class="acc-q" onclick="tog(this)"><span>How does 2-way sharing work?</span><span>▾</span></div>
-      <div class="acc-a">
-        <strong>Host (you):</strong> Pick a folder on the left panel. Friends open the URL in their browser, go to "Host Shared Folder" tab and can download anything you put in that folder.
-        <br><br>
-        <strong>Friends:</strong> Drop files into the right panel. Files land on this PC under the receive directory.
-        <br><br>
-        Neither side needs to install anything. Just a browser.
-      </div>
-    </div>
+    <div class="acc"><button class="acc-q" onclick="tog(this)"><span>Which URL should my friend use?</span><span>▾</span></button>
+    <div class="acc-a"><ul>
+      <li><b>Same Wi-Fi or router:</b> Wi-Fi address (192.168.x.x)</li>
+      <li><b>Your Mobile Hotspot:</b> 192.168.137.1 — always use this one for hotspot</li>
+      <li><b>Direct Ethernet cable:</b> 169.254.x.x — fastest, no router needed</li>
+    </ul></div></div>
 
-    <div class="acc-item">
-      <div class="acc-q" onclick="tog(this)"><span>Which URL should my friend open?</span><span>▾</span></div>
-      <div class="acc-a">
-        <ul>
-          <li><strong>Same Wi-Fi or Ethernet:</strong> Use the Wi-Fi or Wired Ethernet link.</li>
-          <li><strong>Friend on your Mobile Hotspot:</strong> Use the Mobile Hotspot link (<code>192.168.137.1</code>).</li>
-          <li><strong>PC-to-PC cable (no router):</strong> Use the Direct Ethernet link (<code>169.254.x.x</code>).</li>
-        </ul>
-      </div>
-    </div>
+    <div class="acc"><button class="acc-q" onclick="tog(this)"><span>Page says "can't be reached"?</span><span>▾</span></button>
+    <div class="acc-a">Windows Firewall blocked Python. When the prompt appeared, click <b>Allow access</b> and check both Private and Public. Or run in PowerShell as admin:<br><code>netsh advfirewall firewall add rule name="TurboShare" dir=in action=allow protocol=TCP localport={port}</code></div></div>
 
-    <div class="acc-item">
-      <div class="acc-q" onclick="tog(this)"><span>Page says "This site can't be reached"?</span><span>▾</span></div>
-      <div class="acc-a">
-        Windows Firewall is blocking the connection. A prompt should have appeared asking to allow Python — click <strong>Allow access</strong> and check both Private and Public networks.
-      </div>
-    </div>
+    <div class="acc"><button class="acc-q" onclick="tog(this)"><span>Transfer stopped — do I restart from zero?</span><span>▾</span></button>
+    <div class="acc-a">No. Drop the same file again. Smart Resume checks the exact byte count on disk and continues from that point.</div></div>
 
-    <div class="acc-item">
-      <div class="acc-q" onclick="tog(this)"><span>Transfer paused or stuck? (Large files)</span><span>▾</span></div>
-      <div class="acc-a">
-        Drop the same file or folder again. Smart Resume detects exactly how many bytes arrived and continues from that point — it never restarts from zero.
-      </div>
-    </div>
+    <div class="acc"><button class="acc-q" onclick="tog(this)"><span>Hotspot is slow (~2 MB/s)?</span><span>▾</span></button>
+    <div class="acc-a">You're on 2.4 GHz. Switch to 5 GHz: Settings → Network & Internet → Mobile Hotspot → Edit → Band: 5 GHz. Reconnect and reload the page. Expect 20–35 MB/s.<br><br>For maximum speed: plug an Ethernet cable directly between both PCs. No router needed. Expect 60–110 MB/s.</div></div>
 
-    <div class="acc-item">
-      <div class="acc-q" onclick="tog(this)"><span>Hotspot speed is slow (~2 MB/s)?</span><span>▾</span></div>
-      <div class="acc-a">
-        2.4 GHz hotspot is physically limited. Switch to <strong>5 GHz</strong> in Windows Settings → Network & Internet → Mobile Hotspot → Edit → Band: 5 GHz. Reconnect your friend and use <code>192.168.137.1:{port}</code> for 25–40 MB/s.
-        <br><br>
-        For maximum speed, plug an Ethernet cable between both PCs and use <code>169.254.x.x:{port}</code> for 60–110 MB/s.
-      </div>
-    </div>
+    <div class="acc"><button class="acc-q" onclick="tog(this)"><span>"Host Shared Folder" tab shows nothing?</span><span>▾</span></button>
+    <div class="acc-a">Click <b>choose folder</b> in the left panel on the host PC. A native Windows folder picker opens. After you pick, the tab becomes active for all connected devices.</div></div>
   </div>
 </div>
 
-<!-- ── Toast ── -->
-<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<!-- Toast -->
+<div class="toast" id="toast" role="status"></div>
 
-<!-- ── JS ── -->
 <script>
 /* ── State ── */
 let recvPath  = '';
@@ -679,250 +672,233 @@ let sharePath = '';
 let activeTab = 'recv';
 let uploading = false;
 
-/* ── Tab switching ── */
-function switchTab(t) {{
-  activeTab = t;
-  ['recv','share'].forEach(id => {{
-    document.getElementById('panel-'+id).classList.toggle('active', id===t);
-    document.getElementById('tab-'+id).classList.toggle('active', id===t);
-  }});
-  loadDir(t, t==='recv'?recvPath:sharePath, true);
-}}
-
-/* ── Drop Zone ── */
-function ev(e)  {{ e.preventDefault(); document.getElementById('dropZone').classList.add('over'); }}
-function ev2()  {{ document.getElementById('dropZone').classList.remove('over'); }}
-
+/* ── Drag / Drop ── */
+function onDragOver(e) {{ e.preventDefault(); document.getElementById('dropZone').classList.add('over'); }}
+function onDragLeave()  {{ document.getElementById('dropZone').classList.remove('over'); }}
 async function onDrop(e) {{
-  e.preventDefault(); ev2();
-  const items = e.dataTransfer.items, entries = [];
-  for (let i=0; i<items.length; i++) {{
+  e.preventDefault(); onDragLeave();
+  const items = e.dataTransfer.items;
+  const entries = [];
+  for (let i = 0; i < items.length; i++) {{
     const ent = items[i].webkitGetAsEntry?.();
-    if (ent) await walk(ent,'',entries);
-    else if (e.dataTransfer.files[i]) entries.push({{file:e.dataTransfer.files[i],rel:e.dataTransfer.files[i].name}});
+    if (ent) await walk(ent, '', entries);
+    else if (e.dataTransfer.files[i]) entries.push({{file: e.dataTransfer.files[i], rel: e.dataTransfer.files[i].name}});
   }}
   if (entries.length) upload(entries);
 }}
-
 async function walk(e, base, list) {{
   if (e.isFile) {{
-    const f = await new Promise(r=>e.file(r));
-    list.push({{file:f, rel:(base?base+'/':'')+f.name}});
+    const f = await new Promise(r => e.file(r));
+    list.push({{file: f, rel: (base ? base + '/' : '') + f.name}});
   }} else if (e.isDirectory) {{
-    const r = e.createReader(), ents = await new Promise(r2=>r.readEntries(r2));
-    for (const sub of ents) await walk(sub,(base?base+'/':'')+e.name,list);
+    const r = e.createReader();
+    const ents = await new Promise(r2 => r.readEntries(r2));
+    for (const sub of ents) await walk(sub, (base ? base + '/' : '') + e.name, list);
   }}
 }}
+document.getElementById('fileInput').onchange   = e => upload(Array.from(e.target.files).map(f => ({{file:f,rel:f.name}})));
+document.getElementById('folderInput').onchange = e => upload(Array.from(e.target.files).map(f => ({{file:f,rel:f.webkitRelativePath||f.name}})));
 
-document.getElementById('fileInput').onchange = e =>
-  upload(Array.from(e.target.files).map(f=>{{return {{file:f,rel:f.name}}}}) );
-document.getElementById('folderInput').onchange = e =>
-  upload(Array.from(e.target.files).map(f=>{{return {{file:f,rel:f.webkitRelativePath||f.name}}}}) );
-
-/* ── Upload engine (resumable, 2 parallel) ── */
+/* ── Upload engine ── */
 async function upload(items) {{
   if (!items.length) return;
   uploading = true;
-  const card = document.getElementById('progressCard');
-  card.style.display = 'block';
-
+  const pz = document.getElementById('progressZone');
+  pz.style.display = 'flex';
   const total = items.length;
-  const totalBytes = items.reduce((a,i)=>a+i.file.size,0);
-  let doneBytes=0, doneCount=0, skipped=0, lastBytes=0, lastTime=Date.now();
+  const totalBytes = items.reduce((a, i) => a + i.file.size, 0);
+  let doneBytes = 0, doneCount = 0, skipped = 0;
+  let lastBytes = 0, lastTime = Date.now();
 
-  const CONCURRENCY=2;
-  let cur=0;
-
-  async function worker() {{
-    while (cur < items.length) {{
-      const idx=cur++, {{file,rel}}=items[idx];
-      const target = recvPath ? recvPath+'/'+rel : rel;
-
-      let offset=0, skip=false;
+  async function worker(from) {{
+    for (let idx = from; idx < items.length; idx += 2) {{
+      const {{file, rel}} = items[idx];
+      const target = recvPath ? recvPath + '/' + rel : rel;
+      let offset = 0, skip = false;
       try {{
-        const r = await fetch('/api/check?path='+encodeURIComponent(target));
+        const r = await fetch('/api/check?path=' + encodeURIComponent(target));
         const d = await r.json();
-        if (d.size===file.size) {{ skip=true; skipped++; doneBytes+=file.size; }}
-        else if (d.size>0 && d.size<file.size) {{
-          offset=d.size; doneBytes+=offset;
-          document.getElementById('pFile').textContent='Resuming: '+rel+' from '+(offset/1024/1024).toFixed(1)+' MB';
+        if (d.size === file.size) {{ skip = true; skipped++; doneBytes += file.size; }}
+        else if (d.size > 0 && d.size < file.size) {{
+          offset = d.size; doneBytes += offset;
+          document.getElementById('pFile').textContent = 'resuming: ' + rel + ' from ' + (offset/1024/1024).toFixed(1) + ' MB';
         }}
       }} catch(_) {{}}
 
       if (!skip) {{
-        document.getElementById('pFile').textContent='Sending: '+rel;
-        let startOff=offset;
-        for (let attempt=0; attempt<5; attempt++) {{
-          try {{ await sendChunk(file, target, startOff, (d)=>{{ doneBytes+=d; startOff+=d; }}); break; }}
-          catch(_) {{
-            await new Promise(r=>setTimeout(r,1500));
+        document.getElementById('pFile').textContent = rel;
+        let startOff = offset;
+        for (let attempt = 0; attempt < 5; attempt++) {{
+          try {{
+            await sendChunk(file, target, startOff, d => {{ doneBytes += d; startOff += d; }});
+            break;
+          }} catch(_) {{
+            await new Promise(r => setTimeout(r, 1500));
             try {{
-              const rr=await fetch('/api/check?path='+encodeURIComponent(target));
-              const dd=await rr.json();
-              if (dd.size>0) startOff=dd.size;
+              const rr = await fetch('/api/check?path=' + encodeURIComponent(target));
+              const dd = await rr.json();
+              if (dd.size > 0) startOff = dd.size;
             }} catch(__) {{}}
           }}
         }}
       }}
 
       doneCount++;
-      const pct = totalBytes>0 ? Math.min(100,Math.round(doneBytes*100/totalBytes)) : 100;
-      document.getElementById('pBar').style.width = pct+'%';
-      document.getElementById('pStatus').textContent =
-        `[${{doneCount}}/${{total}}] ${{pct}}% — ${{skipped}} skipped`;
+      const pct = totalBytes > 0 ? Math.min(100, Math.round(doneBytes * 100 / totalBytes)) : 100;
+      document.getElementById('pBar').style.width = pct + '%';
+      document.getElementById('pStatus').textContent = doneCount + '/' + total + ' — ' + pct + '%' + (skipped ? ' (' + skipped + ' skipped)' : '');
 
-      const now=Date.now(), dt=(now-lastTime)/1000;
-      if (dt>=0.5) {{
-        const spd=(doneBytes-lastBytes)/(1024*1024)/dt;
-        document.getElementById('pSpeed').textContent=Math.max(0,spd).toFixed(1)+' MB/s';
-        lastBytes=doneBytes; lastTime=now;
+      const now = Date.now(), dt = (now - lastTime) / 1000;
+      if (dt >= 0.5) {{
+        const spd = Math.max(0, (doneBytes - lastBytes) / (1024*1024) / dt);
+        document.getElementById('pSpeed').textContent = spd.toFixed(1) + ' MB/s';
+        lastBytes = doneBytes; lastTime = now;
       }}
     }}
   }}
 
-  await Promise.all(Array.from({{length:Math.min(CONCURRENCY,items.length)}}, worker));
-
-  document.getElementById('pBar').style.width='100%';
-  document.getElementById('pStatus').textContent=`✓ Done — ${{total}} items (${{skipped}} skipped)`;
-  document.getElementById('pSpeed').textContent='Finished';
-  document.getElementById('pFile').textContent='';
-  uploading=false;
-  setTimeout(()=>card.style.display='none', 4000);
+  await Promise.all([worker(0), worker(1)]);
+  document.getElementById('pBar').style.width = '100%';
+  document.getElementById('pStatus').textContent = 'done — ' + total + ' items' + (skipped ? ', ' + skipped + ' skipped' : '');
+  document.getElementById('pSpeed').textContent = '—';
+  document.getElementById('pFile').textContent = '';
+  uploading = false;
+  setTimeout(() => {{ pz.style.display = 'none'; document.getElementById('pBar').style.width = '0'; }}, 4000);
   loadDir('recv', recvPath, true);
 }}
 
 function sendChunk(file, path, offset, onDelta) {{
-  return new Promise((res,rej)=>{{
-    const xhr=new XMLHttpRequest();
-    let up=0, last=Date.now();
-    const chk=setInterval(()=>{{ if(Date.now()-last>20000){{clearInterval(chk);xhr.abort();rej(new Error('idle'));}} }},4000);
-    xhr.upload.onprogress=e=>{{ last=Date.now(); const d=e.loaded-up; up=e.loaded; if(d>0) onDelta(d); }};
-    xhr.open('POST','/api/upload?path='+encodeURIComponent(path)+'&offset='+offset,true);
-    xhr.onload =()=>{{ clearInterval(chk); xhr.status===200?res():rej(new Error(xhr.status)); }};
-    xhr.onerror=()=>{{ clearInterval(chk); rej(new Error('net')); }};
-    xhr.onabort=()=>{{ clearInterval(chk); rej(new Error('abort')); }};
-    xhr.send(offset>0?file.slice(offset):file);
+  return new Promise((res, rej) => {{
+    const xhr = new XMLHttpRequest();
+    let up = 0, last = Date.now();
+    const timer = setInterval(() => {{ if (Date.now() - last > 20000) {{ clearInterval(timer); xhr.abort(); rej(new Error('idle')); }} }}, 3000);
+    xhr.upload.onprogress = e => {{ last = Date.now(); const d = e.loaded - up; up = e.loaded; if (d > 0) onDelta(d); }};
+    xhr.open('POST', '/api/upload?path=' + encodeURIComponent(path) + '&offset=' + offset, true);
+    xhr.onload  = () => {{ clearInterval(timer); xhr.status === 200 ? res() : rej(new Error(xhr.status)); }};
+    xhr.onerror = () => {{ clearInterval(timer); rej(new Error('net')); }};
+    xhr.onabort = () => {{ clearInterval(timer); rej(new Error('abort')); }};
+    xhr.send(offset > 0 ? file.slice(offset) : file);
   }});
 }}
 
-/* ── File Explorer ── */
+/* ── Explorer ── */
 async function loadDir(tab, path, force) {{
-  if (tab==='recv') recvPath=path||'';
-  else sharePath=path||'';
+  if (tab === 'recv') recvPath = path || '';
+  else sharePath = path || '';
 
-  const zipEl = document.getElementById('zip-'+tab);
-  zipEl.href = '/api/zip?tab='+tab+'&path='+encodeURIComponent(path||'');
+  const zipEl = document.getElementById('zip-' + tab);
+  zipEl.href = '/api/zip?tab=' + tab + '&path=' + encodeURIComponent(path || '');
   renderBC(tab, path);
 
   try {{
-    const r = await fetch('/api/list?tab='+tab+'&path='+encodeURIComponent(path||''));
+    const r = await fetch('/api/list?tab=' + tab + '&path=' + encodeURIComponent(path || ''));
     const data = await r.json();
-    const tbody = document.getElementById('tbody-'+tab);
-    tbody.innerHTML='';
+    const tbody = document.getElementById('tbody-' + tab);
+    tbody.innerHTML = '';
 
     if (path) {{
-      const parent = path.includes('/')?path.substring(0,path.lastIndexOf('/')):'';
+      const parent = path.includes('/') ? path.substring(0, path.lastIndexOf('/')) : '';
       const row = tbody.insertRow();
-      row.innerHTML=`<td colspan="3"><a class="file-link folder-link" onclick="loadDir('${{tab}}','${{parent}}',true)">📁 .. (Up)</a></td>`;
+      row.innerHTML = '<td colspan="3"><a class="file-name dir-name" onclick="loadDir(\'' + tab + '\',\'' + parent + '\',true)">.. parent</a></td>';
     }}
 
     if (!data.items?.length) {{
-      const row=tbody.insertRow();
-      row.innerHTML=`<td colspan="3" style="text-align:center;padding:32px;color:var(--muted)">
-        ${{tab==='share'?'No files here. Choose a folder to share on the left.':'Nothing received yet. Drop files on the right panel to send.'}}
-      </td>`;
+      const row = tbody.insertRow();
+      row.innerHTML = '<td colspan="3"><div class="empty-state">' +
+        (tab === 'share' ? 'choose a folder to share on the left' : 'nothing received yet — drop files on the right to send them here') +
+        '</div></td>';
       return;
     }}
 
     for (const item of data.items) {{
-      const ip = (path?path+'/':'')+item.name;
+      const ip2 = (path ? path + '/' : '') + item.name;
       const row = tbody.insertRow();
       if (item.isDir) {{
-        row.innerHTML=`
-          <td><a class="file-link folder-link" onclick="loadDir('${{tab}}','${{ip}}',true)">📁 ${{item.name}}</a></td>
-          <td class="sz">${{item.count}} items</td>
-          <td class="acts"><a class="btn btn-sm btn-ghost" href="/api/zip?tab=${{tab}}&path=${{encodeURIComponent(ip)}}">📦 ZIP</a></td>`;
+        row.innerHTML = '<td><a class="file-name dir-name" onclick="loadDir(\'' + tab + '\',\'' + ip2.replace(/'/g, "\\'") + '\',true)">' + item.name + '</a></td>' +
+          '<td class="file-sz">' + item.count + ' items</td>' +
+          '<td class="td-act"><a class="act-btn" href="/api/zip?tab=' + tab + '&path=' + encodeURIComponent(ip2) + '">zip</a></td>';
       }} else {{
-        const mb=(item.size/1024/1024).toFixed(2);
-        row.innerHTML=`
-          <td><a class="file-link" href="/download?tab=${{tab}}&path=${{encodeURIComponent(ip)}}" target="_blank">📄 ${{item.name}}</a></td>
-          <td class="sz">${{mb}} MB</td>
-          <td class="acts"><a class="btn btn-sm btn-ghost" href="/download?tab=${{tab}}&path=${{encodeURIComponent(ip)}}" download>⬇ Download</a></td>`;
+        const mb = (item.size / 1024 / 1024).toFixed(2);
+        const dl = '/download?tab=' + tab + '&path=' + encodeURIComponent(ip2);
+        row.innerHTML = '<td><a class="file-name" href="' + dl + '" target="_blank">' + item.name + '</a></td>' +
+          '<td class="file-sz">' + mb + ' MB</td>' +
+          '<td class="td-act"><a class="act-btn" href="' + dl + '" download>download</a></td>';
       }}
     }}
   }} catch(e) {{ console.error(e); }}
 }}
 
 function renderBC(tab, path) {{
-  const el = document.getElementById('bc-'+tab);
-  el.innerHTML = `<a onclick="loadDir('${{tab}}','',true)">📁 ${{tab==='recv'?'Received':'Shared'}} Root</a>`;
+  const el = document.getElementById('bc-' + tab);
+  el.innerHTML = '<a onclick="loadDir(\'' + tab + '\',\'\',true)">root</a>';
   if (!path) return;
-  let acc='';
-  path.split('/').forEach(p=>{{
-    acc = acc?acc+'/'+p:p;
-    const f=acc;
-    el.innerHTML += ` / <a onclick="loadDir('${{tab}}','${{f}}',true)">${{p}}</a>`;
+  let acc = '';
+  path.split('/').forEach(p => {{
+    acc = acc ? acc + '/' + p : p;
+    const f = acc;
+    el.innerHTML += '<span>/</span><a onclick="loadDir(\'' + tab + '\',\'' + f.replace(/'/g, "\\'") + '\',true)">' + p + '</a>';
   }});
 }}
 
-/* ── QR ── */
-function openQR() {{
-  const url = window.location.origin;
-  showQR(url);
-  document.getElementById('qrModal').classList.add('open');
-}}
-function showQR(url) {{
-  document.getElementById('qrImg').src='/api/qr?url='+encodeURIComponent(url);
-  document.getElementById('qrUrl').textContent=url;
-  document.getElementById('qrModal').classList.add('open');
+/* ── Tabs ── */
+function switchTab(t) {{
+  activeTab = t;
+  ['recv','share'].forEach(id => {{
+    document.getElementById('panel-' + id).classList.toggle('active', id === t);
+    document.getElementById('tab-' + id).classList.toggle('active', id === t);
+  }});
+  loadDir(t, t === 'recv' ? recvPath : sharePath, true);
 }}
 
-/* ── Host folder picker (native dialog via server) ── */
+/* ── Host folder picker ── */
 async function chooseShareFolder() {{
   try {{
     const r = await fetch('/api/pick_folder');
     const d = await r.json();
-    if (d.success) {{ location.reload(); }}
-    else toast('Could not open folder picker: '+d.error);
-  }} catch(e) {{ toast('Error: '+e); }}
+    if (d.success) location.reload();
+    else toast('picker cancelled or unavailable');
+  }} catch(e) {{ toast('error: ' + e); }}
 }}
-async function clearShareFolder() {{
+async function clearShare() {{
   await fetch('/api/clear_share');
   location.reload();
 }}
 
-/* ── Modals ── */
+/* ── QR ── */
 function openModal(id) {{ document.getElementById(id).classList.add('open'); }}
-function closeOverlay(id) {{ document.getElementById(id).classList.remove('open'); }}
-window.addEventListener('keydown', e=>{{ if(e.key==='Escape') document.querySelectorAll('.overlay.open').forEach(m=>m.classList.remove('open')); }});
+function closeModal(id) {{ document.getElementById(id).classList.remove('open'); }}
+function showQR(url) {{
+  document.getElementById('qrImg').src = '/api/qr?url=' + encodeURIComponent(url);
+  document.getElementById('qrUrl').textContent = url;
+  openModal('qrModal');
+}}
 
-/* ── Misc ── */
+/* ── Util ── */
 function copyText(t) {{
-  navigator.clipboard.writeText(t).then(()=>toast('Copied: '+t)).catch(()=>prompt('Copy:',t));
+  navigator.clipboard.writeText(t).then(() => toast('copied')).catch(() => prompt('Copy:', t));
 }}
 function toast(msg) {{
-  const el=document.getElementById('toast');
-  el.textContent=msg; el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'),2500);
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2200);
 }}
-function tog(el) {{ el.nextElementSibling.classList.toggle('open'); }}
+function tog(btn) {{ btn.nextElementSibling.classList.toggle('open'); }}
+window.addEventListener('keydown', e => {{
+  if (e.key === 'Escape') document.querySelectorAll('.overlay.open').forEach(m => m.classList.remove('open'));
+}});
 
-/* ── Auto-refresh explorer every 4 s ── */
-setInterval(()=>{{ if(!uploading) loadDir(activeTab, activeTab==='recv'?recvPath:sharePath, false); }},4000);
+/* ── Auto-refresh ── */
+setInterval(() => {{ if (!uploading) loadDir(activeTab, activeTab === 'recv' ? recvPath : sharePath, false); }}, 4000);
 
-/* ── Initial load ── */
-loadDir('recv','',true);
+/* ── Init ── */
+loadDir('recv', '', true);
 {'loadDir(\'share\',\'\',true);' if HOST_SHARE else ''}
 </script>
 </body>
 </html>"""
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  FOLDER PICKER (Windows-native tkinter dialog, runs server-side)
-# ═══════════════════════════════════════════════════════════════════════════════
 def pick_folder_dialog():
-    """Open a native folder picker on the server PC and return the path."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -932,12 +908,11 @@ def pick_folder_dialog():
         path = filedialog.askdirectory(title="Choose folder to share with friends")
         root.destroy()
         return path or None
-    except Exception as e:
+    except Exception:
         return None
 
 
 def safe_path(base_dir, rel):
-    """Resolve rel under base_dir, reject traversal."""
     rel = rel.replace("\\", "/").strip("/")
     safe = os.path.normpath(rel).lstrip("/\\")
     full = os.path.abspath(os.path.join(base_dir, safe))
@@ -946,11 +921,7 @@ def safe_path(base_dir, rel):
     return full
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  HTTP HANDLER
-# ═══════════════════════════════════════════════════════════════════════════════
 class Handler(BaseHTTPRequestHandler):
-
     def send_json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
@@ -960,11 +931,10 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        p = urllib.parse.urlparse(self.path)
+        p  = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(p.query)
         path = p.path
-        qs   = urllib.parse.parse_qs(p.query)
 
-        # ── Main page ──
         if path in ("/", "/index.html"):
             body = render_page(SERVER_PORT).encode("utf-8")
             self.send_response(200)
@@ -974,7 +944,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # ── QR ──
         if path == "/api/qr":
             url = qs.get("url", [""])[0] or f"http://127.0.0.1:{SERVER_PORT}"
             if qrcode:
@@ -982,11 +951,9 @@ class Handler(BaseHTTPRequestHandler):
                 qr.add_data(url); qr.make(fit=True)
                 img = qr.make_image(fill_color="black", back_color="white")
                 buf = io.BytesIO(); img.save(buf, "PNG")
-                data = buf.getvalue()
-                ct = "image/png"
+                data = buf.getvalue(); ct = "image/png"
             else:
-                data = b"<svg/>"
-                ct   = "image/svg+xml"
+                data = b"<svg/>"; ct = "image/svg+xml"
             self.send_response(200)
             self.send_header("Content-Type", ct)
             self.send_header("Content-Length", str(len(data)))
@@ -994,7 +961,6 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
-        # ── Folder picker ──
         if path == "/api/pick_folder":
             global HOST_SHARE
             chosen = pick_folder_dialog()
@@ -1010,7 +976,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"success": True})
             return
 
-        # ── Check (resume support) ──
         if path == "/api/check":
             rel = qs.get("path", [""])[0]
             fp  = safe_path(UPLOAD_DIR, rel)
@@ -1020,18 +985,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"exists": False, "size": 0})
             return
 
-        # ── List directory ──
         if path == "/api/list":
-            tab = qs.get("tab", ["recv"])[0]
-            rel = qs.get("path", [""])[0]
+            tab  = qs.get("tab", ["recv"])[0]
+            rel  = qs.get("path", [""])[0]
             base = UPLOAD_DIR if tab == "recv" else HOST_SHARE
             if not base:
-                self.send_json({"items": [], "error": "no_share"})
-                return
+                self.send_json({"items": []}); return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
-                self.send_json({"items": []})
-                return
+                self.send_json({"items": []}); return
             items = []
             try:
                 for name in sorted(os.listdir(target),
@@ -1046,10 +1008,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"items": items})
             return
 
-        # ── Download ──
         if path == "/download":
-            tab = qs.get("tab", ["recv"])[0]
-            rel = qs.get("path", [""])[0]
+            tab  = qs.get("tab", ["recv"])[0]
+            rel  = qs.get("path", [""])[0]
             base = UPLOAD_DIR if tab == "recv" else HOST_SHARE
             if not base:
                 self.send_response(404); self.end_headers(); return
@@ -1061,25 +1022,23 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ct or "application/octet-stream")
             self.send_header("Content-Length", str(size))
-            self.send_header("Content-Disposition",
-                             f'attachment; filename="{os.path.basename(fp)}"')
+            self.send_header("Content-Disposition", f'attachment; filename="{os.path.basename(fp)}"')
             self.end_headers()
             with open(fp, "rb") as f:
                 while chunk := f.read(1024*1024):
                     self.wfile.write(chunk)
             return
 
-        # ── ZIP download ──
         if path == "/api/zip":
-            tab = qs.get("tab", ["recv"])[0]
-            rel = qs.get("path", [""])[0]
+            tab  = qs.get("tab", ["recv"])[0]
+            rel  = qs.get("path", [""])[0]
             base = UPLOAD_DIR if tab == "recv" else HOST_SHARE
             if not base:
                 self.send_response(404); self.end_headers(); return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
                 self.send_response(404); self.end_headers(); return
-            name = os.path.basename(target) + ".zip" if rel else "turboshare.zip"
+            name = (os.path.basename(target) + ".zip") if rel else "turboshare.zip"
             self.send_response(200)
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Disposition", f'attachment; filename="{name}"')
@@ -1087,8 +1046,8 @@ class Handler(BaseHTTPRequestHandler):
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for root, _, files in os.walk(target):
-                    for f in files:
-                        fp2 = os.path.join(root, f)
+                    for f2 in files:
+                        fp2 = os.path.join(root, f2)
                         zf.write(fp2, os.path.relpath(fp2, target))
             self.wfile.write(buf.getvalue())
             return
@@ -1100,13 +1059,11 @@ class Handler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(p.query)
         if p.path != "/api/upload":
             self.send_response(404); self.end_headers(); return
-
         rel    = qs.get("path",   ["upload"])[0]
         offset = int(qs.get("offset", [0])[0])
         fp     = safe_path(UPLOAD_DIR, rel)
         if not fp:
             self.send_response(403); self.end_headers(); return
-
         os.makedirs(os.path.dirname(fp), exist_ok=True)
         cl   = int(self.headers.get("Content-Length", 0))
         done = 0
@@ -1115,34 +1072,27 @@ class Handler(BaseHTTPRequestHandler):
             while done < cl:
                 chunk = self.rfile.read(min(1024*1024, cl-done))
                 if not chunk: break
-                f.write(chunk)
-                done += len(chunk)
-
+                f.write(chunk); done += len(chunk)
         self.send_json({"success": True, "saved": rel, "bytes": done})
 
     def log_message(self, *_):
         pass
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  STARTUP
-# ═══════════════════════════════════════════════════════════════════════════════
 def main():
     global UPLOAD_DIR, SERVER_PORT
+    default = r"D:\TurboShare" if os.path.exists("D:\\") else os.path.join(os.path.expanduser("~"), "Downloads", "TurboShare")
 
-    default = r"D:\TurboShare" if os.path.exists("D:\\") else os.path.join(
-        os.path.expanduser("~"), "Downloads", "TurboShare")
-
-    print("=" * 62)
-    print("   ⚡ TurboShare — 2-Way Cross-Device File Transfer Hub")
-    print("=" * 62)
+    print("="*58)
+    print("  TurboShare — Cross-Device File Transfer")
+    print("="*58)
 
     if len(sys.argv) > 1:
         chosen = sys.argv[1].strip().strip("'\"")
     else:
-        print(f"\nDefault save folder: {default}")
+        print(f"\nDefault receive folder: {default}")
         try:
-            inp = input(f"Where should received files go? [Enter for default]: ").strip().strip("'\"")
+            inp = input("Receive folder path [Enter for default]: ").strip().strip("'\"")
             chosen = inp or default
         except (EOFError, KeyboardInterrupt):
             chosen = default
@@ -1154,30 +1104,24 @@ def main():
         UPLOAD_DIR = os.path.abspath("./TurboShare_Received")
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-    di = {"free_gb": "?"}
     try:
         _, _, free = shutil.disk_usage(UPLOAD_DIR)
-        di["free_gb"] = f"{free/1024**3:.1f}"
+        free_gb = f"{free/1024**3:.1f}"
     except Exception:
-        pass
+        free_gb = "?"
 
-    print(f"\n✓ Receiving files to : {UPLOAD_DIR}")
-    print(f"✓ Free disk space    : {di['free_gb']} GB")
-    print(f"✓ Host share folder  : (choose in browser → 'Choose Folder')")
+    print(f"\n  recv  → {UPLOAD_DIR}  ({free_gb} GB free)")
+    print(f"  share → pick in browser after opening\n")
 
     ifaces = get_network_interfaces()
-    primary = next((f"http://{i['ip']}:{SERVER_PORT}" for i in ifaces
-                    if "Wi-Fi" in i["category"] or "Ethernet" in i["category"]), None)
-
-    print("\n" + "-"*62)
-    print("  CONNECT FROM YOUR DEVICES")
-    print("-"*62)
+    print("-"*58)
     for i in ifaces:
-        print(f"  {i['icon']} {i['category']:<26} → http://{i['ip']}:{SERVER_PORT}")
-    print("-"*62)
+        print(f"  {i['category']:<22} http://{i['ip']}:{SERVER_PORT}")
+    print("-"*58)
 
+    primary = next((f"http://{i['ip']}:{SERVER_PORT}" for i in ifaces if i["priority"] <= 3), None)
     if qrcode and primary:
-        print(f"\nQR Code → {primary}\n")
+        print(f"\n  QR → {primary}\n")
         try:
             qr = qrcode.QRCode()
             qr.add_data(primary)
@@ -1185,15 +1129,14 @@ def main():
         except Exception:
             pass
 
-    print(f"\n🚀 TurboShare live on port {SERVER_PORT}. Press Ctrl+C to stop.\n")
-
+    print(f"\n  Listening on :{SERVER_PORT} — Ctrl+C to stop\n")
     try:
         srv = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), Handler)
         srv.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopped.")
+        print("Stopped.")
     except OSError as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}\nIs another TurboShare already running?")
 
 
 if __name__ == "__main__":
