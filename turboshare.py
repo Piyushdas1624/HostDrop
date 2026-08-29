@@ -1632,6 +1632,46 @@ body {
   margin: 0 auto;
 }
 
+/* QR Interface Switcher Chips */
+.qr-interface-chips {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+.qr-interface-chips::-webkit-scrollbar { display: none; }
+
+.qr-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-standard);
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.qr-chip:hover {
+  background: var(--surface-3);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+
+.qr-chip.active {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.4);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+}
+
 /* Drive Ribbon Wrapper & Chevrons */
 .drive-ribbon-wrapper {
   position: relative;
@@ -2615,9 +2655,9 @@ body {
       </div>
       <div class="brand-title">
         TurboShare
-        <span class="status-pill host-badge" id="hostStatusPill">
+        <span class="status-pill host-badge" id="hostStatusPill" title="Host PC Only: 127.0.0.1:__PORT__ (Cannot be accessed by other devices)">
           <span class="status-dot"></span>
-          Host Computer &bull; :__PORT__
+          Host Computer &bull; 127.0.0.1:__PORT__ (Host Only)
         </span>
         <span class="status-pill guest-badge" id="guestStatusPill" style="display: none;">
           <span class="status-dot" style="background: #38bdf8; box-shadow: 0 0 8px #38bdf8;"></span>
@@ -2644,6 +2684,17 @@ body {
 
 <!-- Network Links Ribbon (Horizontal Wheel Scroll, Touch Swipe, Grid Toggle) -->
 <section class="network-bar">
+  <div class="network-bar-header" style="max-width: var(--page-max-width); margin: 0 auto 6px auto; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+    <div style="display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">
+      <span class="status-dot" style="background: #22c55e; box-shadow: 0 0 6px #22c55e;"></span>
+      <span>Network Addresses for Other Devices (Phones, Tablets & PCs)</span>
+    </div>
+    <div class="host-notice-text" style="font-size: 10px; color: var(--text-tertiary); display: flex; align-items: center; gap: 6px;">
+      <span>Host PC:</span>
+      <code class="mono" style="color: var(--text-secondary); background: var(--surface-2); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-standard);">127.0.0.1:__PORT__</code>
+      <span style="color: #f87171;">(Host Only &bull; No QR)</span>
+    </div>
+  </div>
   <div class="network-bar-inner">
     <button class="scroll-chevron" id="chevronLeft" onclick="scrollRibbon(-260)" title="Scroll Left">
       <svg class="icon" viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
@@ -3032,24 +3083,71 @@ body {
   </div>
 </div>
 
-<!-- QR Connect Modal -->
+<!-- Connect Device & Network Access Modal -->
 <div class="modal-overlay" id="qrModal">
-  <div class="modal-content" style="max-width: 400px; text-align: center;">
+  <div class="modal-content" style="max-width: 480px;">
     <div class="modal-header">
-      <div class="modal-title" id="qrModalTitle">Connect Device</div>
-      <button class="icon-btn-micro" onclick="closeModal('qrModal')">
+      <div class="modal-title" style="display: flex; align-items: center; gap: 8px;">
+        <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
+        <span id="qrModalTitle">Connect Other Devices</span>
+      </div>
+      <button class="icon-btn-micro" onclick="closeModal('qrModal')" aria-label="Close">
         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
-    <div class="modal-body" style="align-items: center; gap: 16px;">
-      <div style="background: #ffffff; padding: 12px; border-radius: var(--radius-md); display: inline-block;">
-        <img id="qrModalImg" src="" alt="QR Code" style="width: 220px; height: 220px; display: block;">
+
+    <div class="modal-body" style="gap: 14px; padding: 16px 20px;">
+      <!-- Section 1: Network IP for Other Devices (Phones / Laptops) -->
+      <div class="qr-network-section" id="qrNetworkSection">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span class="status-dot" style="background: #22c55e; box-shadow: 0 0 8px #22c55e;"></span>
+            <span style="font-size: 12px; font-weight: 600; color: var(--text-primary);">Network IP (For Other Devices)</span>
+          </div>
+          <span class="drive-card-badge" id="qrActiveBadge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">Wi-Fi</span>
+        </div>
+
+        <!-- Network Interface Switcher Chips (if multiple interfaces exist) -->
+        <div class="qr-interface-chips" id="qrInterfaceChips" style="display: flex; gap: 6px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 4px;">
+          <!-- Dynamically populated via JS -->
+        </div>
+
+        <!-- The Working QR Code for the Network IP -->
+        <div style="display: flex; flex-direction: column; align-items: center; gap: 12px; background: var(--surface-2); border: 1px solid var(--border-standard); border-radius: var(--radius-md); padding: 16px;">
+          <div style="background: #ffffff; padding: 10px; border-radius: var(--radius-md); display: inline-block; box-shadow: 0 4px 16px rgba(0,0,0,0.4);">
+            <img id="qrModalImg" src="" alt="Network QR Code" style="width: 180px; height: 180px; display: block;">
+          </div>
+          <div style="text-align: center; width: 100%;">
+            <div class="mono" id="qrModalUrl" style="font-size: 13px; font-weight: 600; color: var(--text-primary); word-break: break-all; margin-bottom: 4px;"></div>
+            <div style="font-size: 11px; color: var(--text-tertiary);">Scan with your phone or tablet camera to open TurboShare on your local network.</div>
+          </div>
+          <button class="btn btn-primary btn-sm" style="width: 100%; justify-content: center;" onclick="copyAddress(document.getElementById('qrModalUrl').textContent, this)">
+            <svg class="icon" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+            <span>Copy Network Link for Phone</span>
+          </button>
+        </div>
       </div>
-      <div class="mono" id="qrModalUrl" style="font-size: 12px; color: var(--text-primary); word-break: break-all;"></div>
-      <div style="font-size: 11px; color: var(--text-tertiary);">Scan with your phone or tablet camera to connect instantly over local Wi-Fi / Hotspot.</div>
+
+      <!-- Section 2: Host PC Address Only (Localhost) - NO QR CODE -->
+      <div class="host-ip-card" id="qrHostSection" style="background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(255, 255, 255, 0.15); border-radius: var(--radius-md); padding: 12px 14px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <svg class="icon" style="color: var(--text-secondary); width: 15px; height: 15px;" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            <span style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Host PC IP (Localhost Only)</span>
+          </div>
+          <span style="font-size: 10px; font-weight: 500; padding: 2px 8px; border-radius: var(--radius-pill); background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3);">Host Only &bull; No QR</span>
+        </div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <code class="mono" id="qrHostUrl" style="font-size: 12px; color: var(--text-primary);">http://127.0.0.1:__PORT__</code>
+          <button class="btn btn-ghost btn-sm" style="font-size: 11px; padding: 4px 10px;" onclick="copyAddress(document.getElementById('qrHostUrl').textContent, this)">Copy</button>
+        </div>
+        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.4;">
+          🔒 <strong>Host Device Only:</strong> This address works exclusively in a browser on this host computer. It <em>cannot</em> be accessed by phones or other devices on your network. (No QR code generated).
+        </div>
+      </div>
     </div>
-    <div class="modal-footer" style="justify-content: center;">
-      <button class="btn btn-primary btn-sm" onclick="copyAddress(document.getElementById('qrModalUrl').textContent)">Copy Link</button>
+
+    <div class="modal-footer" style="justify-content: flex-end; padding: 12px 20px;">
       <button class="btn btn-ghost btn-sm" onclick="closeModal('qrModal')">Close</button>
     </div>
   </div>
@@ -3279,6 +3377,9 @@ let isTransferring = false;
 let browserModalTarget = 'recv';
 let activeModalBrowsePath = '';
 let activeFaqCategory = 'all';
+
+/* Network Interfaces injected from backend */
+window.turboNetInterfaces = __NET_INTERFACES_JSON__;
 
 /* Host vs Guest Role Adaptive State */
 const isHostClient = ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname);
@@ -4456,14 +4557,82 @@ function copyAddress(text, cardEl) {
   });
 }
 
+let currentSelectedQrUrl = '';
+
 function showGeneralQR() {
-  showQRModal(window.location.origin, 'TurboShare Web Hub');
+  const ifaces = window.turboNetInterfaces || [];
+  // Prioritize wifi > hotspot > ethernet > first non-virtual > first available
+  let best = ifaces.find(i => i.kind === 'wifi') 
+          || ifaces.find(i => i.kind === 'hotspot')
+          || ifaces.find(i => i.kind === 'ethernet' || i.kind === 'ethernet-direct')
+          || ifaces.find(i => i.kind !== 'virtual')
+          || ifaces[0];
+          
+  const targetUrl = best ? best.url : window.location.origin;
+  const targetLabel = best ? best.label : 'Network Connection';
+  showQRModal(targetUrl, targetLabel);
+}
+
+function selectQRInterface(url, label) {
+  currentSelectedQrUrl = url;
+  const qrImg = document.getElementById('qrModalImg');
+  const qrUrlEl = document.getElementById('qrModalUrl');
+  const qrActiveBadge = document.getElementById('qrActiveBadge');
+
+  if (qrImg) qrImg.src = '/api/qr?url=' + encodeURIComponent(url);
+  if (qrUrlEl) qrUrlEl.textContent = url;
+  if (qrActiveBadge) qrActiveBadge.textContent = label || 'Network IP';
+
+  // Highlight active chip
+  const chips = document.querySelectorAll('.qr-chip');
+  chips.forEach(c => {
+    c.classList.toggle('active', c.getAttribute('data-url') === url);
+  });
 }
 
 function showQRModal(url, label) {
-  document.getElementById('qrModalTitle').textContent = label;
-  document.getElementById('qrModalImg').src = '/api/qr?url=' + encodeURIComponent(url);
-  document.getElementById('qrModalUrl').textContent = url;
+  const ifaces = window.turboNetInterfaces || [];
+  
+  // If url is localhost or 127.0.0.1, NEVER generate a QR for localhost!
+  // Instead, select the best real network interface for the phone to scan!
+  const isLoopback = !url || url.includes('127.0.0.1') || url.includes('localhost') || url.includes('::1');
+  if (isLoopback) {
+    let best = ifaces.find(i => i.kind === 'wifi') 
+            || ifaces.find(i => i.kind === 'hotspot')
+            || ifaces.find(i => i.kind === 'ethernet' || i.kind === 'ethernet-direct')
+            || ifaces.find(i => i.kind !== 'virtual')
+            || ifaces[0];
+    if (best) {
+      url = best.url;
+      label = best.label;
+    }
+  }
+
+  // Populate Interface Switcher Chips
+  const chipsContainer = document.getElementById('qrInterfaceChips');
+  if (chipsContainer && ifaces.length > 0) {
+    chipsContainer.innerHTML = '';
+    ifaces.forEach(i => {
+      const chip = document.createElement('div');
+      chip.className = 'qr-chip' + (i.url === url ? ' active' : '');
+      chip.setAttribute('data-url', i.url);
+      chip.innerHTML = `<span>${escapeHtml(i.label)}</span> <span class="mono" style="opacity: 0.7; font-size: 10px;">${escapeHtml(i.ip)}</span>`;
+      chip.onclick = () => selectQRInterface(i.url, i.label);
+      chipsContainer.appendChild(chip);
+    });
+    chipsContainer.style.display = ifaces.length > 1 ? 'flex' : 'none';
+  } else if (chipsContainer) {
+    chipsContainer.style.display = 'none';
+  }
+
+  selectQRInterface(url, label);
+
+  // Update Host PC section visibility & port
+  const hostSection = document.getElementById('qrHostSection');
+  if (hostSection) {
+    hostSection.style.display = isHostClient ? 'block' : 'none';
+  }
+
   openModal('qrModal');
 }
 
@@ -4598,7 +4767,19 @@ def render_page(port):
 
     net_items_html = "\n".join(net_items)
 
+    ifaces_json = json.dumps([
+        {
+            "ip": i["ip"],
+            "url": f"http://{i['ip']}:{port}",
+            "kind": i["kind"],
+            "label": i["label"],
+            "desc": i["desc"]
+        }
+        for i in ifaces
+    ])
+
     out = HTML_TEMPLATE.replace("__PORT__", str(port))
+    out = out.replace("__NET_INTERFACES_JSON__", ifaces_json)
     out = out.replace("__NET_ITEMS__", net_items_html)
     out = out.replace("__RECV_PATH__", recv_path_esc)
     out = out.replace("__RECV_FREE_GB__", str(recv_di.get('free_gb', '?')))
