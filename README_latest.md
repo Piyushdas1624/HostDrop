@@ -1,18 +1,6 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/⚡_TurboShare-Cross--Device_File_Transfer-38bdf8?style=for-the-badge&labelColor=0f172a" alt="TurboShare">
-</p>
+# TurboShare
 
-<p align="center">
-  <strong>No cloud. No accounts. No USB. Just open a browser.</strong><br>
-  Transfer files between any two devices on the same local network at full LAN speed.
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.8%2B-3776ab?style=flat-square&logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-0ea5e9?style=flat-square">
-  <img src="https://img.shields.io/badge/License-MIT-10b981?style=flat-square">
-  <img src="https://img.shields.io/badge/No%20Dependencies-Zero%20Install%20Required-f59e0b?style=flat-square">
-</p>
+TurboShare is a local network file transfer tool that runs in your web browser. You run one Python script on your computer, and any device on the same local network (such as phones, tablets, and other laptops) can send and download files through a web browser without installing additional apps or signing up for accounts.
 
 ---
 
@@ -20,16 +8,12 @@
 
 TurboShare connects two or more devices over your local Wi-Fi router, a mobile hotspot, or a direct Ethernet cable. Transfer speeds run at local network limits instead of routing through internet servers or cloud storage.
 
-| Feature | Details |
-|---|---|
-| 🔄 **Two-way sharing** | Host shares a folder for download and receives uploads into an inbox simultaneously |
-| 📁 **Host drive navigator** | Built-in folder browser with drive capacity bars, breadcrumbs, and quick search |
-| ⚡ **Full LAN speed** | Direct Ethernet: 60 to 110 MB/s · Wi-Fi 5 GHz: 25 to 55 MB/s · Hotspot: 20 to 45 MB/s |
-| 🔁 **Smart resume** | Interrupted transfers verify `/api/check` and resume from the exact byte on disk |
-| 📱 **Cross-platform** | Works on Windows, macOS, Linux, iOS, Android, Smart TVs, and consoles in any browser |
-| 🔌 **Direct Ethernet** | Automatic APIPA `169.254.x.x` detection for routerless PC-to-PC gigabit transfers |
-| 📡 **QR connect** | Scannable QR codes for Wi-Fi and mobile hotspot network interfaces |
-| 🗂️ **Dual folder download** | Download folders as on-the-fly streaming ZIP archives or save directly to disk |
+- Two-way sharing: The host computer can share an existing folder for others to download while also receiving incoming uploads into a chosen inbox folder.
+- Browser-based host folder navigator: Pick folders directly inside the web interface with visual drive capacity bars, clickable breadcrumbs, and real-time folder search filtering.
+- Two folder download options: Download directories as a streaming ZIP file or write the nested folder structure directly to disk on supported browsers without needing to unzip.
+- Smart resume: If a transfer drops due to Wi-Fi loss or browser closure, dropping the same file resumes from the last received byte on disk rather than restarting from zero.
+- Cross-platform support: Works on Windows, macOS, Linux, Android, iOS, smart TVs, and game consoles with a standard browser.
+- Clear network access: The interface separates the host computer loopback address (127.0.0.1:8080, host only, no QR code) from the actual network addresses (Wi-Fi, hotspot, or cable) that other devices use to connect.
 
 ---
 
@@ -147,5 +131,3 @@ When downloading directories from the Library tab:
 ## License
 
 This project is licensed under the MIT License.
-
-<p align="center">Made with ⚡ by <a href="https://github.com/Piyushdas1624">Piyush Das</a></p>
