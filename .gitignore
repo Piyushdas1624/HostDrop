@@ -7,6 +7,8 @@ __pycache__/
 # Temporary test scripts
 temp_script.js
 live_rendered_script.js
+capture_*.py
+skills-lock.json
 
 # Virtual environments
 .venv/
