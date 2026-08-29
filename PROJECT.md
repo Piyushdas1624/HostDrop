@@ -58,8 +58,8 @@ TurboShare is a high-speed, zero-dependency, 2-way cross-device local file trans
 - **Response**:
 ```json
 {
-  "current_path": "C:\\Users\\piklu",
-  "parent_path": "C:\\Users",
+  "current_path": "D:\\TurboShare",
+  "parent_path": "D:\\",
   "drives": [
     {
       "name": "C:\\",
@@ -75,7 +75,7 @@ TurboShare is a high-speed, zero-dependency, 2-way cross-device local file trans
   "subdirs": [
     {
       "name": "Projects",
-      "path": "C:\\Users\\piklu\\Projects",
+      "path": "D:\\TurboShare\\Projects",
       "modified": 1712345678
     }
   ],
@@ -88,16 +88,15 @@ TurboShare is a high-speed, zero-dependency, 2-way cross-device local file trans
 ```
 
 ### POST /api/create_folder
-- **Body**: `{"path": "C:\\Users\\piklu\\NewFolder"}`
-- **Response**: `{"status": "ok", "path": "C:\\Users\\piklu\\NewFolder"}`
+- **Body**: `{"path": "D:\\TurboShare\\NewFolder"}`
+- **Response**: `{"status": "ok", "path": "D:\\TurboShare\\NewFolder"}`
 
 ### POST /api/set_path
-- **Body**: `{"path": "C:\\Users\\piklu\\Projects", "type": "recv" | "share"}`
-- **Response**: `{"success": true, "status": "ok", "path": "C:\\Users\\piklu\\Projects", "type": "recv", "free_gb": 70.5}`
+- **Body**: `{"path": "D:\\TurboShare\\Projects", "type": "recv" | "share"}`
+- **Response**: `{"success": true, "status": "ok", "path": "D:\\TurboShare\\Projects", "type": "recv", "free_gb": 70.5}`
 
 ## Code Layout
-- `c:\Users\piklu\Documents\turboshare\turboshare.py` (Primary monolithic, self-contained server + embedded SPA frontend)
-- `c:\Users\piklu\Documents\turboshare\file_drop_server.py` (100% bit-for-bit identical synchronized copy)
-- `c:\Users\piklu\Documents\turboshare\test_turboshare.py` (Functional test suite — 29 tests)
-- `c:\Users\piklu\Documents\turboshare\tests\test_adversarial_backend.py` (Adversarial stress test suite — 35 tests)
-- `c:\Users\piklu\Documents\turboshare\verify_playwright.py` (Multi-viewport live browser audit)
+- `turboshare.py` (Primary monolithic, self-contained server with embedded SPA frontend)
+- `Run_TurboShare.bat` (Windows launcher)
+- `README.md` (Documentation)
+- `PROJECT.md` (Project specifications and interface contracts)
