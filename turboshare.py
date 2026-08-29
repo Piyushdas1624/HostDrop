@@ -36,11 +36,149 @@ try:
 except ImportError:
     qrcode = None
 
-# ── Global State & Thread Synchronization ───────────────────────────────────────
+# ── Authentication & Security Engine ──────────────────────────────────────────
+try:
+    import auth
+except ImportError:
+    auth = None
+
+import re
+import atexit
+import getpass
+
+# ── Global State & Invariant Configuration ─────────────────────────────────────
 STATE_LOCK = threading.Lock()
 UPLOAD_DIR = ""   # Where incoming files sent to the PC are stored (Inbox tab)
 HOST_SHARE = ""   # Folder shared by PC for others to browse/download (Library tab)
 SERVER_PORT = 8080
+
+# Global Tunnel State
+GLOBAL_TUNNEL_URL = ""
+GLOBAL_TUNNEL_PROVIDER = "none"
+TUNNEL_PROC = None
+REQUIRE_AUTH_ON_LAN = False
+REMOTE_FULL_DRIVE_ACCESS = False
+
+# Resource & DoS Protection Limits
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024 * 1024       # 50 GB per file
+MAX_ZIP_SIZE = 10 * 1024 * 1024 * 1024          # 10 GB max folder zip export
+MAX_ZIP_FILES = 10_000                          # Max entries in a single zip archive
+MAX_ZIP_DEPTH = 25                              # Max folder recursion depth
+MIN_FREE_DISK_BUFFER = 500 * 1024 * 1024        # 500 MB required free disk margin
+
+# Windows Reserved Device Filenames
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+}
+
+try:
+    CURRENT_USER = getpass.getuser()
+except Exception:
+    CURRENT_USER = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+USER_HOME = os.path.expanduser("~")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GLOBAL TUNNEL ORCHESTRATOR (Cloudflare Tunnel & Pinggy SSH)
+# ═══════════════════════════════════════════════════════════════════════════════
+class TunnelManager:
+    @staticmethod
+    def get_cloudflared_path():
+        p = shutil.which("cloudflared")
+        if p:
+            return p
+        candidates = [
+            r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+            r"C:\Program Files\cloudflared\cloudflared.exe",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bin", "cloudflared.exe")
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return None
+
+    @staticmethod
+    def start(port=8080, provider="auto"):
+        global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER, TUNNEL_PROC
+        if provider == "none":
+            return ""
+
+        cf_path = TunnelManager.get_cloudflared_path()
+        if provider in ("auto", "cloudflare") and cf_path:
+            cmd = [cf_path, "tunnel", "--url", f"http://127.0.0.1:{port}"]
+            try:
+                TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                cf_regex = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+
+                def monitor_cf():
+                    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
+                    for line in TUNNEL_PROC.stderr:
+                        m = cf_regex.search(line)
+                        if m and not GLOBAL_TUNNEL_URL:
+                            with STATE_LOCK:
+                                GLOBAL_TUNNEL_URL = m.group(0)
+                                GLOBAL_TUNNEL_PROVIDER = "cloudflare"
+                            print(f"\n  [+] Cloudflare Tunnel established: {GLOBAL_TUNNEL_URL}")
+                            if auth:
+                                print(f"  [+] Global Magic Link: {GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}\n")
+                            break
+
+                t = threading.Thread(target=monitor_cf, daemon=True)
+                t.start()
+                t.join(timeout=10)
+                if GLOBAL_TUNNEL_URL:
+                    return GLOBAL_TUNNEL_URL
+            except Exception:
+                pass
+
+        # Fallback to Pinggy SSH
+        if provider in ("auto", "pinggy") and shutil.which("ssh"):
+            cmd = ["ssh", "-p", "443", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30", "-R", f"0:localhost:{port}", "a.pinggy.io"]
+            try:
+                TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                pinggy_regex = re.compile(r"https://[a-zA-Z0-9-]+\.a?\.?pinggy\.link")
+
+                def monitor_pinggy():
+                    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
+                    for line in TUNNEL_PROC.stdout:
+                        m = pinggy_regex.search(line)
+                        if m and not GLOBAL_TUNNEL_URL:
+                            with STATE_LOCK:
+                                GLOBAL_TUNNEL_URL = m.group(0)
+                                GLOBAL_TUNNEL_PROVIDER = "pinggy"
+                            print(f"\n  [+] Pinggy Tunnel established: {GLOBAL_TUNNEL_URL}")
+                            if auth:
+                                print(f"  [+] Global Magic Link: {GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}\n")
+                            break
+
+                t = threading.Thread(target=monitor_pinggy, daemon=True)
+                t.start()
+                t.join(timeout=10)
+                if GLOBAL_TUNNEL_URL:
+                    return GLOBAL_TUNNEL_URL
+            except Exception:
+                pass
+
+        return ""
+
+    @staticmethod
+    def stop():
+        global TUNNEL_PROC
+        if TUNNEL_PROC:
+            try:
+                TUNNEL_PROC.terminate()
+                TUNNEL_PROC.wait(timeout=2)
+            except Exception:
+                try:
+                    TUNNEL_PROC.kill()
+                except Exception:
+                    pass
+            TUNNEL_PROC = None
+
+atexit.register(TunnelManager.stop)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -168,23 +306,117 @@ def disk_info(path):
         }
 
 
+def sanitize_path_for_client(path: str, is_admin: bool = False) -> str:
+    """
+    Redact host username and sensitive home path structures for remote/guest clients.
+    Exposes full paths only to verified authenticated administrators.
+    """
+    if not path:
+        return ""
+    if is_admin:
+        return path
+
+    norm = os.path.normpath(path)
+    if USER_HOME and norm.startswith(USER_HOME):
+        rel = norm[len(USER_HOME):].lstrip("/\\")
+        return f"~/{rel}".replace("\\", "/")
+
+    if CURRENT_USER and CURRENT_USER in norm:
+        norm = norm.replace(f"\\Users\\{CURRENT_USER}", "\\Users\\[User]")
+        norm = norm.replace(f"/home/{CURRENT_USER}", "/home/[User]")
+        norm = norm.replace(f"/Users/{CURRENT_USER}", "/Users/[User]")
+
+    return norm
+
+
 def safe_path(base_dir, rel):
     """
-    Prevent directory traversal attacks by ensuring the resolved path
-    is strictly contained inside base_dir.
+    Strict Path Traversal & Safe Path Normalization Engine (Hardened).
+    Defends against:
+    - Relative directory traversal (../, ..\\, mixed slashes, multi-dot)
+    - URL-encoded, double-encoded, multi-encoded traversal (%2e%2e%2f, %252e%252e%252f)
+    - URL-encoded & raw null-byte string poisoning (\\0, %00, %2500)
+    - NTFS Alternate Data Streams (::$DATA, file.txt:stream, %3a, %253a)
+    - UNC network paths (\\\\server\\share, //server/share, \\\\?\\)
+    - Absolute and root-prefixed paths (/etc/passwd, C:\\Windows, \\Windows)
+    - Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    - Symlink and directory junction escapes outside base_dir
     """
-    if not base_dir:
+    if not base_dir or rel is None:
         return None
-    rel = (rel or "").replace("\\", "/").strip("/")
-    safe = os.path.normpath(rel).lstrip("/\\")
-    full = os.path.abspath(os.path.join(base_dir, safe))
-    base_abs = os.path.abspath(base_dir)
-    try:
-        if os.path.commonpath([base_abs, full]) != base_abs:
+
+    rel_str = str(rel)
+
+    # 1. Null-byte rejection before decoding
+    if "\0" in rel_str or "\0" in str(base_dir) or "%00" in rel_str.lower():
+        return None
+
+    # 2. Recursive URL unquoting (up to 5 iterations or until fixed-point)
+    clean_rel = rel_str
+    for _ in range(5):
+        prev = clean_rel
+        clean_rel = urllib.parse.unquote(clean_rel)
+        if clean_rel == prev:
+            break
+
+    # Re-verify null byte poisoning after full unquoting
+    if "\0" in clean_rel or "%00" in clean_rel.lower():
+        return None
+
+    # 3. NTFS Alternate Data Streams (ADS) and drive colon rejection
+    if ":" in clean_rel:
+        return None
+
+    # 4. Strip whitespace
+    stripped = clean_rel.strip()
+    if not stripped and rel_str:
+        return None
+
+    # 5. Reject absolute / root-prefixed / UNC paths
+    if stripped.startswith(("/", "\\")):
+        return None
+
+    # 6. Slash normalization and stripping
+    rel_clean = stripped.replace("\\", "/")
+    norm_rel = os.path.normpath(rel_clean)
+
+    if norm_rel == ".." or norm_rel.startswith("../") or norm_rel.startswith("..\\") or norm_rel.split("/")[0] == "..":
+        return None
+
+    # 7. Check Windows reserved device names across all path segments
+    parts = norm_rel.replace("\\", "/").split("/")
+    for p in parts:
+        if not p:
+            continue
+        seg = p.rstrip(". ")
+        base_name = seg.split(".")[0].strip().upper()
+        if base_name in WINDOWS_RESERVED_NAMES:
             return None
-    except ValueError:
+
+    try:
+        base_abs = os.path.abspath(base_dir)
+        base_real = os.path.realpath(base_abs)
+
+        if norm_rel == ".":
+            return base_real
+
+        full_path = os.path.abspath(os.path.join(base_real, norm_rel))
+
+        if os.path.exists(full_path):
+            full_real = os.path.realpath(full_path)
+        else:
+            parent = os.path.dirname(full_path)
+            parent_real = os.path.realpath(parent)
+            if os.path.commonpath([base_real, parent_real]) != base_real:
+                return None
+            full_real = full_path
+
+        if os.path.commonpath([base_real, full_real]) != base_real:
+            return None
+
+        return full_real
+    except (ValueError, OSError):
         return None
-    return full
 
 
 def get_host_drives():
@@ -2667,6 +2899,7 @@ body {
     </div>
 
     <div class="header-actions">
+      <div id="authStatusBadge"></div>
       <button class="btn btn-ghost btn-sm" onclick="showGeneralQR()" title="Show Web QR Code">
         <svg class="icon" viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
         <span class="btn-label">QR Connect</span>
@@ -2987,6 +3220,35 @@ body {
     </div>
     <div style="font-size: 18px; font-weight: 600; color: var(--text-primary);">Drop files or folders anywhere to send to PC</div>
     <div style="font-size: 12px; color: var(--text-secondary);">Saving to: <span class="mono" id="dropTargetName">Inbox Folder on PC</span></div>
+  </div>
+</div>
+
+<!-- Master Passcode Authentication Modal -->
+<div class="modal-overlay" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle" style="display: none;">
+  <div class="modal-content" style="max-width: 440px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg class="icon" style="color: #60a5fa;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span id="authModalTitle">TurboShare Security Passcode</span>
+      </div>
+      <button class="icon-btn-micro" onclick="closeModal('authModal')" aria-label="Close dialog">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" style="padding: 18px 20px; gap: 14px;">
+      <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
+        Enter the <strong>Master App Passcode</strong> or your <strong>Bookmark Key</strong> to unlock remote storage controls and full access.
+      </div>
+      <div>
+        <label for="authPasswordInput" style="display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 6px; letter-spacing: 0.5px;">Passcode or Key</label>
+        <input type="password" id="authPasswordInput" placeholder="Enter passcode..." autocomplete="current-password" class="modal-path-input" style="width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 14px; padding: 10px 12px;" onkeydown="if(event.key==='Enter') submitAuthLogin()">
+      </div>
+      <div id="authErrorMsg" style="display: none; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 12px;"></div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('authModal')">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="authSubmitBtn" onclick="submitAuthLogin()">Unlock Access</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -3980,6 +4242,12 @@ async function browseModalPath(path) {
   
   try {
     const res = await fetch('/api/browse_host?path=' + encodeURIComponent(path || ''));
+    if (res.status === 401) {
+      closeModal('hostBrowserModal');
+      openAuthModal();
+      showToast('Authentication required to browse PC storage.', 'info');
+      return;
+    }
     const data = await res.json();
     
     activeModalBrowsePath = data.current_path || '';
@@ -4703,8 +4971,98 @@ setInterval(() => {
   }
 }, 5000);
 
+/* ═══════════════════════════════════════════════════════════════════════════════
+   AUTHENTICATION & ACCESS CONTROL (Persistent Security Engine)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+let isCallerAuthenticated = false;
+
+async function checkAuthStatus() {
+  try {
+    const res = await fetch('/api/check_auth');
+    const data = await res.json();
+    isCallerAuthenticated = !!data.authenticated;
+    updateAuthUI();
+  } catch (e) {}
+}
+
+function updateAuthUI() {
+  const badge = document.getElementById('authStatusBadge');
+  if (!badge) return;
+  if (isCallerAuthenticated) {
+    badge.innerHTML = `
+      <div style="display:inline-flex; align-items:center; gap:6px; font-size:11px; color:#34d399; background:rgba(52,211,153,0.1); padding:4px 9px; border-radius:6px; border:1px solid rgba(52,211,153,0.25);">
+        <svg style="width:13px; height:13px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+        <span style="font-weight:500;">Authenticated</span>
+        <button onclick="logoutAuth()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; padding:0 2px 0 4px; font-size:11px; text-decoration:underline;">Logout</button>
+      </div>`;
+  } else {
+    badge.innerHTML = `
+      <button class="btn btn-ghost btn-sm" onclick="openAuthModal()" style="color: #60a5fa; border: 1px solid rgba(96,165,250,0.25); background: rgba(96,165,250,0.08);" title="Enter Master Passcode to manage host storage">
+        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span class="btn-label">Passcode</span>
+      </button>`;
+  }
+}
+
+function openAuthModal() {
+  openModal('authModal');
+  setTimeout(() => {
+    const inp = document.getElementById('authPasswordInput');
+    if (inp) inp.focus();
+  }, 100);
+}
+
+async function submitAuthLogin() {
+  const inp = document.getElementById('authPasswordInput');
+  const err = document.getElementById('authErrorMsg');
+  const btn = document.getElementById('authSubmitBtn');
+  const val = inp ? inp.value.trim() : '';
+  if (!val) return;
+
+  btn.disabled = true;
+  btn.innerText = 'Verifying...';
+  err.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: val })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      isCallerAuthenticated = true;
+      closeModal('authModal');
+      if (inp) inp.value = '';
+      updateAuthUI();
+      showToast('Authenticated successfully! Full access unlocked.', 'success');
+      loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, true);
+    } else {
+      err.innerText = data.error === 'rate_limited' ? ('Too many attempts. Locked out for ' + data.retry_after + 's.') : 'Invalid passcode or access key.';
+      err.style.display = 'block';
+    }
+  } catch (e) {
+    err.innerText = 'Network error during authentication.';
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Unlock Access';
+  }
+}
+
+async function logoutAuth() {
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+    isCallerAuthenticated = false;
+    updateAuthUI();
+    showToast('Logged out of TurboShare session.', 'info');
+    loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, true);
+  } catch (e) {}
+}
+
 /* Initial Boot */
 applyClientRole();
+checkAuthStatus();
 loadDirectory('recv', '', true);
 </script>
 
@@ -4712,7 +5070,8 @@ loadDirectory('recv', '', true);
 </html>"""
 
 
-def render_page(port):
+def render_page(port, is_admin=False):
+    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
     ifaces = get_network_interfaces()
     with STATE_LOCK:
         recv_path = UPLOAD_DIR
@@ -4721,11 +5080,36 @@ def render_page(port):
     recv_di = disk_info(recv_path)
     share_di = disk_info(share_path) if share_path else {}
     
-    recv_path_esc = html.escape(recv_path)
-    share_path_esc = html.escape(share_path) if share_path else "No folder selected"
+    display_recv = recv_path if is_admin else sanitize_path_for_client(recv_path, is_admin=False)
+    display_share = share_path if is_admin else sanitize_path_for_client(share_path, is_admin=False)
+
+    recv_path_esc = html.escape(display_recv)
+    share_path_esc = html.escape(display_share) if share_path else "No folder selected"
 
     # Pre-render network cards
     net_items = []
+
+    # Prepend Global Tunnel Card if tunnel active
+    if GLOBAL_TUNNEL_URL:
+        magic_url = f"{GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}" if auth else GLOBAL_TUNNEL_URL
+        tunnel_badge = f"""
+        <div class="net-item net-card-tunnel" onclick="copyAddress('{GLOBAL_TUNNEL_URL}', this)" title="Click to copy public address" role="button" tabindex="0">
+          <div class="net-item-top">
+            <div class="net-kind-badge tunnel">
+              <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <span class="net-kind-text">Global Access ({GLOBAL_TUNNEL_PROVIDER.title()})</span>
+            </div>
+            <button class="icon-btn-micro" onclick="event.stopPropagation(); showQRModal('{magic_url}', 'Global Remote Access (Magic Link)')" title="Scan Magic QR Code" aria-label="QR Code">
+              <svg viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
+            </button>
+          </div>
+          <div class="net-item-url tabular-nums">{GLOBAL_TUNNEL_URL}</div>
+          <div class="net-item-desc">Secure Worldwide Access via Encrypted Tunnel</div>
+          <div class="net-copied-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Copied!</div>
+        </div>
+        """
+        net_items.append(tunnel_badge)
+
     for i in ifaces:
         url = f"http://{i['ip']}:{port}"
         badge_kind = i['kind']
@@ -4799,14 +5183,44 @@ def render_page(port):
 # ═══════════════════════════════════════════════════════════════════════════════
 class TurboShareHandler(BaseHTTPRequestHandler):
 
+    def send_security_headers(self):
+        """Inject strict defense-in-depth HTTP security headers."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+
     def send_json(self, data, status=200):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_security_headers()
         self.end_headers()
         self.wfile.write(payload)
+
+    def is_authenticated(self) -> bool:
+        """Verify caller session against auth module."""
+        global REQUIRE_AUTH_ON_LAN
+        if self.is_physical_localhost() and not REQUIRE_AUTH_ON_LAN:
+            return True
+        if auth:
+            return auth.is_authenticated(self)
+        return True
+
+    def check_csrf(self) -> bool:
+        """Validate Sec-Fetch-Site to neutralize CSRF attacks."""
+        sec_fetch = self.headers.get("Sec-Fetch-Site", "")
+        if sec_fetch == "cross-site":
+            return False
+        return True
+
+    def is_physical_localhost(self) -> bool:
+        """Verify whether request originated physically from localhost (not via tunnel)."""
+        peer = self.client_address[0]
+        is_loopback = peer in ("127.0.0.1", "::1", "localhost") or peer.startswith("127.")
+        has_tunnel_header = bool(self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For"))
+        return is_loopback and not has_tunnel_header
 
     def do_GET(self):
         global UPLOAD_DIR, HOST_SHARE
@@ -4814,12 +5228,28 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
+        # ── Intercept Authentication Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth"):
+            if auth.handle_auth_routes(self, path, qs):
+                return
+
+        # ── Tunnel Status API ──
+        if path == "/api/tunnel":
+            self.send_json({
+                "enabled": bool(GLOBAL_TUNNEL_URL),
+                "url": GLOBAL_TUNNEL_URL,
+                "provider": GLOBAL_TUNNEL_PROVIDER
+            })
+            return
+
         # ── Main Web Dashboard ──
         if path in ("/", "/index.html"):
-            content = render_page(SERVER_PORT).encode("utf-8")
+            is_admin = self.is_authenticated()
+            content = render_page(SERVER_PORT, is_admin=is_admin).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
+            self.send_security_headers()
             self.end_headers()
             self.wfile.write(content)
             return
@@ -4862,6 +5292,13 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── In-Browser Host Filesystem Browser ──
         if path == "/api/browse_host":
+            if not self.is_authenticated():
+                self.send_json({
+                    "error": "unauthorized",
+                    "login_required": True,
+                    "message": "Authentication required to browse host drives."
+                }, status=401)
+                return
             req_path = qs.get("path", [""])[0]
             data = browse_host_directory(req_path)
             self.send_json(data)
@@ -4943,6 +5380,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             safe_ascii_fname = raw_fname.encode("ascii", "ignore").decode("ascii").strip() or "download"
             fname_utf8 = urllib.parse.quote(raw_fname)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_fname}"; filename*=UTF-8\'\'{fname_utf8}')
+            self.send_security_headers()
             self.end_headers()
             try:
                 with open(fp, "rb") as f:
@@ -4987,6 +5425,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             safe_ascii_zip = zip_name.encode("ascii", "ignore").decode("ascii").strip() or "archive.zip"
             fname_esc = urllib.parse.quote(zip_name)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_zip}"; filename*=UTF-8\'\'{fname_esc}')
+            self.send_security_headers()
             self.end_headers()
             try:
                 self.wfile.write(raw_zip)
@@ -4996,6 +5435,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Trigger Native OS Folder Picker ──
         if path == "/api/pick_folder":
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
+                return
             target_type = qs.get("target", ["share"])[0] or qs.get("type", ["share"])[0]
             chosen, err = pick_folder_powershell()
             if chosen:
@@ -5011,6 +5453,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open Folder in Host OS Explorer ──
         if path == "/api/open_folder":
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                return
             target_type = qs.get("type", ["recv"])[0] or qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 target_dir = HOST_SHARE if target_type == "share" else UPLOAD_DIR
@@ -5048,6 +5493,24 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
+        # ── Intercept Authentication Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout"):
+            content_len = int(self.headers.get("Content-Length", 0))
+            body_bytes = self.rfile.read(content_len) if content_len > 0 else b""
+            body_data = {}
+            if body_bytes:
+                try:
+                    body_data = json.loads(body_bytes.decode("utf-8"))
+                except Exception:
+                    pass
+            if auth.handle_auth_routes(self, path, qs, body_data=body_data):
+                return
+
+        # ── CSRF Protection ──
+        if not self.check_csrf():
+            self.send_json({"error": "forbidden", "message": "Cross-site request blocked."}, status=403)
+            return
+
         # ── Resumable Chunked Upload Protocol ──
         if path == "/api/upload":
             rel = qs.get("path", ["upload"])[0]
@@ -5058,6 +5521,12 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             full = safe_path(base, rel)
             if not full:
                 self.send_response(403); self.end_headers(); return
+
+            # Pre-flight check disk space buffer (500 MB)
+            di = disk_info(base)
+            if di.get("free_bytes", 0) > 0 and di.get("free_bytes", 0) < MIN_FREE_DISK_BUFFER:
+                self.send_json({"success": False, "error": "insufficient_storage", "message": "Host disk space is low (less than 500 MB remaining)."}, status=507)
+                return
 
             try:
                 os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -5111,6 +5580,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Set Folder Path ──
         if path in ("/api/set_path", "/api/set_folder"):
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to change host storage paths."}, status=401)
+                return
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len)
             try:
@@ -5142,6 +5614,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Create New Directory on Host ──
         if path == "/api/create_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to create folders."}, status=401)
+                return
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len)
             try:
@@ -5161,6 +5636,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Trigger Native Picker (POST) ──
         if path == "/api/pick_folder":
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
+                return
             chosen, err = pick_folder_powershell()
             if chosen:
                 self.send_json({"success": True, "status": "ok", "path": chosen})
@@ -5170,6 +5648,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open in OS (POST) ──
         if path == "/api/open_folder":
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                return
             content_len = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
@@ -5196,7 +5677,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 #  APPLICATION BOOTSTRAP & SERVER LAUNCHER
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
-    global UPLOAD_DIR, SERVER_PORT
+    global UPLOAD_DIR, SERVER_PORT, GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
 
     default_dir = r"D:\TurboShare" if os.path.exists("D:\\") else os.path.join(
         os.path.expanduser("~"), "Downloads", "TurboShare"
@@ -5210,6 +5691,17 @@ def main():
     UPLOAD_DIR = os.path.abspath(chosen)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+    # Initialize Auth Configuration
+    if auth:
+        auth.init_config()
+
+    # Launch Global Tunnel if configured
+    tunnel_prov = os.environ.get("TUNNEL_PROVIDER", "auto").strip().lower()
+    if tunnel_prov != "none":
+        print(f"[*] Initializing Global Remote Access tunnel (provider={tunnel_prov})...")
+        t = threading.Thread(target=lambda: TunnelManager.start(SERVER_PORT, provider=tunnel_prov), daemon=True)
+        t.start()
+
     ifaces = get_network_interfaces()
     primary = next((f"http://{i['ip']}:{SERVER_PORT}" for i in ifaces
                     if i["kind"] in ("wifi", "ethernet", "ethernet-direct", "hotspot")), None)
@@ -5220,6 +5712,12 @@ def main():
     print(f"  Inbox Folder (Save Target) : {UPLOAD_DIR}")
     for i in ifaces:
         print(f"  {i['label']:<24} -> http://{i['ip']}:{SERVER_PORT}")
+    if auth:
+        print("  " + "-" * 64)
+        print("  [SECURITY CREDENTIALS]")
+        print(f"  Master App Passcode        : {auth.get_master_password()}")
+        print(f"  Persistent Bookmark Key    : {auth.get_access_key()}")
+        print(f"  Direct Localhost Access    : http://127.0.0.1:{SERVER_PORT}")
     print("=" * 68)
 
     if qrcode and primary:

@@ -30,6 +30,7 @@ TurboShare connects two or more devices over your local Wi-Fi router, a mobile h
 | 🔌 **Direct Ethernet** | Automatic APIPA `169.254.x.x` detection for routerless PC-to-PC gigabit transfers |
 | 📡 **QR connect** | Scannable QR codes for Wi-Fi and mobile hotspot network interfaces |
 | 🗂️ **Dual folder download** | Download folders as on-the-fly streaming ZIP archives or save directly to disk |
+| 🌐 **Global remote access** | Access your home PC from anywhere via encrypted tunnels with persistent authentication |
 
 ---
 
@@ -122,6 +123,24 @@ When downloading directories from the Library tab:
 
 2. **Save as folder**:
    On supported Chromium browsers (Chrome, Edge, Opera), this uses the File System Access API to let you select a local folder on your computer and writes the full folder structure with all subdirectories directly to disk without requiring an unzip step. Unsupported browsers automatically fall back to ZIP download.
+
+---
+
+## Global remote access (access from anywhere)
+
+TurboShare includes built-in encrypted tunneling so you can access your home computer from anywhere in the world on mobile data or outside Wi-Fi.
+
+### How it works
+
+1. When TurboShare launches, it automatically checks for Cloudflare Tunnel (`cloudflared`) or Windows OpenSSH (`ssh` to Pinggy).
+2. A secure public HTTPS link is displayed in the terminal and on the dashboard.
+3. Access to host files is guarded by a dual-anchor persistent security architecture:
+   - **Master Passcode**: Salted PBKDF2-HMAC-SHA256 hash (600,000 iterations) stored in `.env`.
+   - **Bookmark Access Key**: A persistent access key (`ts_live_...`) for 1-click browser auto-login that sets a long-lived 30-day session cookie (`turboshare_session`).
+   - **Brute-Force Shield**: Sliding-window IP rate limiting (max 5 failed attempts per 15 minutes) with exponential tarpitting ($1\text{s} \to 16\text{s}$) and automatic HTTP 429 lockout.
+   - **Security Sandboxing**: Host drives and internal operating system paths are masked from remote guests. Direct Windows Explorer triggers and GUI dialogs are disabled over public tunnels.
+
+See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model, penetration testing verification commands, and security specifications.
 
 ---
 

@@ -20,6 +20,11 @@ take_*.py
 inspect_*.py
 adversarial_*.py
 
+# Environment variables and secrets
+.env
+.env.local
+.bin/
+
 # Virtual environments
 .venv/
 venv/
