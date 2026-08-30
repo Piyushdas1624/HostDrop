@@ -23,6 +23,7 @@ adversarial_*.py
 # Environment variables and secrets
 .env
 .env.local
+.sessions.json
 .bin/
 
 # Virtual environments

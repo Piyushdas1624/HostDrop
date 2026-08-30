@@ -2929,6 +2929,130 @@ body {
     min-height: 44px;
   }
 }
+
+/* Security & Remote Sessions UI Elements */
+.badge-count {
+  background: #0284c7;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 4px;
+}
+.remote-auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #34d399;
+  font-weight: 500;
+}
+.remote-auth-pill .btn-logout {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.remote-auth-pill .btn-logout:hover {
+  background: rgba(239, 68, 68, 0.4);
+  color: #fff;
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulseAnim 2s infinite;
+}
+@keyframes pulseAnim {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+.sec-card-box {
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.sessions-scroll-table {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-standard);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.sessions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.sessions-table th {
+  background: var(--surface-3);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px;
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.sessions-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.sessions-table tr:last-child td {
+  border-bottom: none;
+}
+.session-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.session-status-badge.active {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.session-status-badge.revoked {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.btn-danger-outline {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.btn-danger-outline:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: #ef4444;
+}
 </style>
 </head>
 <body>
@@ -2955,6 +3079,11 @@ body {
 
     <div class="header-actions">
       <div id="authStatusBadge"></div>
+      <button class="btn btn-ghost btn-sm host-only-btn" id="btnSecurityModal" onclick="openSecurityModal()" title="View remote sessions, revoke access, and change password" style="display: none;">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span class="btn-label">Security &amp; Sessions</span>
+        <span class="badge-count" id="headerSessionCount" style="display: none;">0</span>
+      </button>
       <button class="btn btn-ghost btn-sm" onclick="showGeneralQR()" title="Show Web QR Code">
         <svg class="icon" viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
         <span class="btn-label">QR Connect</span>
@@ -3303,6 +3432,76 @@ body {
         <button class="btn btn-secondary btn-sm" onclick="closeModal('authModal')">Cancel</button>
         <button class="btn btn-primary btn-sm" id="authSubmitBtn" onclick="submitAuthLogin()">Unlock Access</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Host Security & Sessions Management Modal (Localhost Host Only) -->
+<div class="modal-overlay" id="securityModal" role="dialog" aria-modal="true" aria-labelledby="securityModalTitle">
+  <div class="modal-content" style="max-width: 680px; max-height: 85vh; display: flex; flex-direction: column;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg class="icon" style="color: #38bdf8;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span id="securityModalTitle">Host Security &amp; Remote Sessions</span>
+      </div>
+      <button class="icon-btn-micro" onclick="closeModal('securityModal')" aria-label="Close dialog">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" style="padding: 16px 20px; gap: 18px; overflow-y: auto; flex: 1;">
+      
+      <!-- Section 1: Active Remote Sessions -->
+      <div class="sec-card-box">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+          <div>
+            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">Active Remote Sessions</div>
+            <div style="font-size: 11px; color: var(--text-secondary);">Devices connected via Cloudflare Tunnel or Remote Passcode</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-secondary btn-sm" onclick="refreshSessionsList()">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              <span>Refresh</span>
+            </button>
+            <button class="btn-danger-outline btn-sm" onclick="revokeAllSessions()">Revoke All</button>
+          </div>
+        </div>
+
+        <div class="sessions-scroll-table">
+          <table class="sessions-table">
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>IP &amp; Location</th>
+                <th>Issued</th>
+                <th>Last Active</th>
+                <th>Status</th>
+                <th style="text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="sessionsTableBody">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-tertiary); padding: 24px;">Loading active sessions...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Section 2: Change Master Passcode -->
+      <div class="sec-card-box">
+        <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Update Master Passcode</div>
+        <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 14px;">Change the password required for remote access outside this computer</div>
+        
+        <form onsubmit="handleHostPasswordChange(event)" style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <input type="password" id="newMasterPasswordInput" placeholder="Enter new passcode (min 6 characters)..." class="modal-path-input" style="flex: 1; min-width: 220px; font-family: var(--font-mono); font-size: 13px; padding: 9px 12px;" required>
+            <button type="submit" class="btn btn-primary btn-sm" id="btnChangePasswordSubmit">Save Passcode</button>
+          </div>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+            <input type="checkbox" id="chkRevokeOnPassChange" checked style="accent-color: var(--accent);">
+            <span>Automatically revoke all existing remote sessions on password change</span>
+          </label>
+        </form>
+      </div>
+
     </div>
   </div>
 </div>
@@ -3700,6 +3899,7 @@ window.turboNetInterfaces = __NET_INTERFACES_JSON__;
 
 /* Host vs Guest Role Adaptive State */
 const isHostClient = ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname);
+function isLocalhost() { return isHostClient; }
 
 function applyClientRole() {
   const hostPill = document.getElementById('hostStatusPill');
@@ -5037,25 +5237,46 @@ async function checkAuthStatus() {
     const data = await res.json();
     isCallerAuthenticated = !!data.authenticated;
     updateAuthUI();
+    if (isLocalhost()) {
+      refreshSessionsList();
+    }
   } catch (e) {}
 }
 
 function updateAuthUI() {
   const badge = document.getElementById('authStatusBadge');
-  if (!badge) return;
-  if (isCallerAuthenticated) {
-    badge.innerHTML = `
-      <div style="display:inline-flex; align-items:center; gap:6px; font-size:11px; color:#34d399; background:rgba(52,211,153,0.1); padding:4px 9px; border-radius:6px; border:1px solid rgba(52,211,153,0.25);">
-        <svg style="width:13px; height:13px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
-        <span style="font-weight:500;">Authenticated</span>
-        <button onclick="logoutAuth()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; padding:0 2px 0 4px; font-size:11px; text-decoration:underline;">Logout</button>
-      </div>`;
+  const hostPill = document.getElementById('hostStatusPill');
+  const guestPill = document.getElementById('guestStatusPill');
+  const secBtn = document.getElementById('btnSecurityModal');
+
+  const isLocal = isLocalhost();
+
+  if (isLocal) {
+    if (hostPill) hostPill.style.display = 'inline-flex';
+    if (guestPill) guestPill.style.display = 'none';
+    if (secBtn) secBtn.style.display = 'inline-flex';
+    if (badge) badge.innerHTML = '';
   } else {
-    badge.innerHTML = `
-      <button class="btn btn-ghost btn-sm" onclick="openAuthModal()" style="color: #60a5fa; border: 1px solid rgba(96,165,250,0.25); background: rgba(96,165,250,0.08);" title="Enter Master Passcode to manage host storage">
-        <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        <span class="btn-label">Passcode</span>
-      </button>`;
+    if (hostPill) hostPill.style.display = 'none';
+    if (guestPill) guestPill.style.display = 'inline-flex';
+    if (secBtn) secBtn.style.display = 'none';
+
+    if (badge) {
+      if (isCallerAuthenticated) {
+        badge.innerHTML = `
+          <div class="remote-auth-pill">
+            <span class="pulse-dot"></span>
+            <span style="font-weight:600;">Remote Session</span>
+            <button class="btn-logout" onclick="logoutAuth()" title="Disconnect this session">Log Out</button>
+          </div>`;
+      } else {
+        badge.innerHTML = `
+          <button class="btn btn-ghost btn-sm" onclick="openAuthModal()" style="color: #60a5fa; border: 1px solid rgba(96,165,250,0.25); background: rgba(96,165,250,0.08);" title="Enter Master Passcode to manage host storage">
+            <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <span class="btn-label">Passcode</span>
+          </button>`;
+      }
+    }
   }
 }
 
@@ -5108,17 +5329,488 @@ async function submitAuthLogin() {
 async function logoutAuth() {
   try {
     await fetch('/api/logout', { method: 'POST' });
-    isCallerAuthenticated = false;
-    updateAuthUI();
-    showToast('Logged out of TurboShare session.', 'info');
-    loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, true);
   } catch (e) {}
+  isCallerAuthenticated = false;
+  // Immediately reload so server renders the standalone Passcode Gate screen!
+  window.location.reload();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HOST SECURITY & REMOTE SESSIONS CENTER (Physical Host Only)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+function openSecurityModal() {
+  openModal('securityModal');
+  refreshSessionsList();
+}
+
+function closeSecurityModal() {
+  closeModal('securityModal');
+}
+
+async function refreshSessionsList() {
+  const tbody = document.getElementById('sessionsTableBody');
+  const countBadge = document.getElementById('headerSessionCount');
+  if (!tbody) return;
+
+  try {
+    const res = await fetch('/api/sessions');
+    if (res.status === 403) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;padding:16px;">Security management is available on the Host PC only.</td></tr>';
+      return;
+    }
+    const data = await res.json();
+    if (!data.success || !data.sessions) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary);padding:16px;">No session data available.</td></tr>';
+      return;
+    }
+
+    const sessions = data.sessions;
+    const activeSessions = sessions.filter(s => !s.revoked);
+    if (countBadge) {
+      countBadge.innerText = activeSessions.length;
+      countBadge.style.display = activeSessions.length > 0 ? 'inline-block' : 'none';
+    }
+
+    if (sessions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary);padding:24px;">No remote sessions recorded yet. Your server is safe.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = sessions.map(s => {
+      const isRevoked = Boolean(s.revoked);
+      const statusHtml = isRevoked
+        ? '<span class="session-status-badge revoked"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;"></span> Revoked</span>'
+        : '<span class="session-status-badge active"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;"></span> Active</span>';
+
+      const actionHtml = isRevoked
+        ? '<span style="font-size:11px;color:var(--text-tertiary);">-</span>'
+        : `<button class="btn-danger-outline btn-sm" onclick="revokeSession('${s.id}')">Revoke</button>`;
+
+      const issuedStr = new Date(s.issued_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const lastActiveStr = new Date(s.last_active * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      return `<tr>
+        <td style="font-weight:500;color:var(--text-primary);">${escapeHtml(s.device || 'Web Client')}</td>
+        <td><div class="mono" style="font-size:11px;">${escapeHtml(s.ip || 'Unknown')}</div><div style="font-size:10px;color:var(--text-tertiary);">${escapeHtml(s.location || 'Unknown')}</div></td>
+        <td class="mono" style="font-size:11px;">${issuedStr}</td>
+        <td class="mono" style="font-size:11px;">${lastActiveStr}</td>
+        <td>${statusHtml}</td>
+        <td style="text-align:right;">${actionHtml}</td>
+      </tr>`;
+    }).join('');
+
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;padding:16px;">Failed to fetch active sessions.</td></tr>';
+  }
+}
+
+async function revokeSession(sessionId) {
+  try {
+    const res = await fetch('/api/revoke_session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'Remote session revoked.', 'success');
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to revoke session.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error revoking session.', 'error');
+  }
+}
+
+async function revokeAllSessions() {
+  try {
+    const res = await fetch('/api/revoke_session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'All remote sessions revoked.', 'success');
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to revoke sessions.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error revoking sessions.', 'error');
+  }
+}
+
+async function handleHostPasswordChange(e) {
+  e.preventDefault();
+  const input = document.getElementById('newMasterPasswordInput');
+  const chk = document.getElementById('chkRevokeOnPassChange');
+  const btn = document.getElementById('btnChangePasswordSubmit');
+  const newPwd = (input.value || '').trim();
+
+  if (newPwd.length < 6) {
+    showToast('Password must be at least 6 characters long.', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerText = 'Saving...';
+
+  try {
+    const res = await fetch('/api/change_password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        new_password: newPwd,
+        revoke_sessions: Boolean(chk.checked)
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'Passcode updated successfully.', 'success');
+      input.value = '';
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to update passcode.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error updating passcode.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Save Passcode';
+  }
 }
 
 /* Initial Boot */
 applyClientRole();
 checkAuthStatus();
 loadDirectory('recv', '', true);
+</script>
+
+</body>
+</html>"""
+
+
+def render_login_page() -> str:
+    """Renders the standalone glassmorphism Passcode Gate screen for unauthenticated remote visitors."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TurboShare &mdash; Remote Authentication</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-root: #090a0c;
+      --bg-card: rgba(18, 20, 26, 0.85);
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(56, 189, 248, 0.5);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.25);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.12);
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100dvh;
+      background: radial-gradient(circle at 50% 20%, rgba(56, 189, 248, 0.08) 0%, transparent 60%),
+                  radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.05) 0%, transparent 50%),
+                  var(--bg-root);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      overflow-x: hidden;
+    }
+    .gate-container {
+      width: 100%;
+      max-width: 440px;
+      animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .gate-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      padding: 2.5rem 2rem;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7),
+                  0 0 0 1px rgba(255, 255, 255, 0.04),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      text-align: center;
+      position: relative;
+    }
+    .gate-card.shake {
+      animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+    }
+    @keyframes shake {
+      10%, 90% { transform: translate3d(-2px, 0, 0); }
+      20%, 80% { transform: translate3d(4px, 0, 0); }
+      30%, 50%, 70% { transform: translate3d(-6px, 0, 0); }
+      40%, 60% { transform: translate3d(6px, 0, 0); }
+    }
+    .shield-badge {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 1.5rem;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(99, 102, 241, 0.15));
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      box-shadow: 0 0 24px var(--accent-glow);
+    }
+    .shield-badge svg {
+      width: 32px;
+      height: 32px;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.88rem;
+      line-height: 1.5;
+      margin-bottom: 2rem;
+    }
+    .form-group {
+      margin-bottom: 1.25rem;
+      text-align: left;
+    }
+    .label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .input-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      background: rgba(9, 10, 12, 0.7);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 0.85rem 3rem 0.85rem 1rem;
+      color: #fff;
+      font-size: 1rem;
+      font-family: inherit;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+      background: rgba(9, 10, 12, 0.95);
+    }
+    .toggle-pwd {
+      position: absolute;
+      right: 0.75rem;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 0.35rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s;
+    }
+    .toggle-pwd:hover { color: var(--text-primary); }
+    .toggle-pwd svg { width: 20px; height: 20px; }
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      padding: 0.9rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+    .btn-submit:hover:not(:disabled) {
+      background: linear-gradient(135deg, #0369a1, #1d4ed8);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.45);
+    }
+    .btn-submit:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    .btn-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .error-box {
+      background: var(--danger-bg);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.25rem;
+      color: #fca5a5;
+      font-size: 0.85rem;
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      text-align: left;
+    }
+    .error-box svg { width: 18px; height: 18px; flex-shrink: 0; }
+    .footer-note {
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      opacity: 0.7;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+    }
+    .footer-note svg { width: 14px; height: 14px; }
+  </style>
+</head>
+<body>
+
+<div class="gate-container">
+  <div class="gate-card" id="gateCard">
+    <div class="shield-badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="m9 12 2 2 4-4"/>
+      </svg>
+    </div>
+    <h1>TurboShare Remote Access</h1>
+    <p class="subtitle">This server is protected with end-to-end access control. Enter the master passcode to connect.</p>
+
+    <div class="error-box" id="gateErrorBox">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y2="16" y2="16"/></svg>
+      <span id="gateErrorText">Invalid master passcode.</span>
+    </div>
+
+    <form id="gateForm" onsubmit="submitGatePasscode(event)">
+      <div class="form-group">
+        <label class="label" for="gatePasscode">Master Passcode</label>
+        <div class="input-wrapper">
+          <input type="password" id="gatePasscode" placeholder="Enter server passcode" required autocomplete="current-password" autofocus>
+          <button type="button" class="toggle-pwd" onclick="togglePasscodeVisibility()" aria-label="Toggle password view">
+            <svg id="eyeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <button type="submit" id="gateBtn" class="btn-submit">
+        <span>Unlock Access</span>
+        <svg style="width:18px;height:18px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </form>
+
+    <div class="footer-note">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <span>Encrypted Tunnel &middot; Rate Limited &middot; Host Audited</span>
+    </div>
+  </div>
+</div>
+
+<script>
+function togglePasscodeVisibility() {
+  const input = document.getElementById('gatePasscode');
+  const icon = document.getElementById('eyeIcon');
+  if (input.type === 'password') {
+    input.type = 'text';
+    icon.innerHTML = '<path d="m9.88 9.88 4.24 4.24m-6.72-2.12a9.66 9.66 0 0 1 4.6-2c5 0 8 4 8 4a15.82 15.82 0 0 1-2.9 3.5m-3.1 1.5a7.3 7.3 0 0 1-2.6.5c-5 0-8-4-8-4a15.88 15.88 0 0 1 4.12-3.88M2 2l20 20"/>';
+  } else {
+    input.type = 'password';
+    icon.innerHTML = '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>';
+  }
+}
+
+async function submitGatePasscode(e) {
+  e.preventDefault();
+  const input = document.getElementById('gatePasscode');
+  const btn = document.getElementById('gateBtn');
+  const errBox = document.getElementById('gateErrorBox');
+  const errText = document.getElementById('gateErrorText');
+  const card = document.getElementById('gateCard');
+
+  const pwd = input.value.trim();
+  if (!pwd) return;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span>Verifying...</span>';
+  errBox.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pwd })
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && data.success) {
+      btn.style.background = 'linear-gradient(135deg, #059669, #10b981)';
+      btn.innerHTML = '<span>&#10003; Verified! Loading...</span>';
+      setTimeout(() => {
+        window.location.reload();
+      }, 400);
+      return;
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '<span>Unlock Access</span><svg style="width:18px;height:18px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    card.classList.remove('shake');
+    void card.offsetWidth;
+    card.classList.add('shake');
+
+    if (res.status === 429) {
+      const wait = data.retry_after || 60;
+      errText.innerText = 'Too many failed attempts. Locked out for ' + wait + ' seconds.';
+    } else {
+      errText.innerText = 'Incorrect master passcode. Access attempt logged.';
+    }
+    errBox.style.display = 'flex';
+    input.select();
+    input.focus();
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = '<span>Unlock Access</span>';
+    errText.innerText = 'Connection error reaching server.';
+    errBox.style.display = 'flex';
+  }
+}
 </script>
 
 </body>
@@ -5285,8 +5977,8 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
-        # ── Intercept Authentication Routes ──
-        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth"):
+        # ── Intercept Authentication & Session Management Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth", "/api/sessions", "/api/revoke_session", "/api/change_password"):
             if auth.handle_auth_routes(self, path, qs):
                 return
 
@@ -5299,10 +5991,26 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # ── Main Web Dashboard ──
+        # ── Main Web Dashboard / Zero-Trust Passcode Gate ──
         if path in ("/", "/index.html"):
-            is_admin = self.is_authenticated()
-            content = render_page(SERVER_PORT, is_admin=is_admin).encode("utf-8")
+            is_host = self.is_physical_localhost()
+            is_auth = self.is_authenticated()
+
+            # Strict Zero-Trust Gating:
+            # If request is from remote tunnel or external client and NOT authenticated,
+            # DO NOT RENDER THE DASHBOARD! Serve the standalone Passcode Gate screen.
+            if not is_host and not is_auth:
+                content = render_login_page().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_security_headers()
+                self.end_headers()
+                self.wfile.write(content)
+                return
+
+            # Otherwise, serve the full dashboard
+            content = render_page(SERVER_PORT, is_admin=is_host).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
@@ -5363,6 +6071,14 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Directory Listing for Dual Tabs ──
         if path == "/api/list":
+            if not self.is_authenticated():
+                self.send_json({
+                    "error": "unauthorized",
+                    "login_required": True,
+                    "items": [],
+                    "message": "Authentication required to view files."
+                }, status=401)
+                return
             tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
@@ -5416,6 +6132,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Smart Resume Byte Check ──
         if path == "/api/check":
+            if not self.is_authenticated():
+                self.send_json({"exists": False, "size": 0, "login_required": True}, status=401)
+                return
             rel = qs.get("path", [""])[0] or qs.get("filename", [""])[0]
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
@@ -5429,6 +6148,8 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Download Single File ──
         if path == "/download":
+            if not self.is_authenticated():
+                self.send_response(401); self.send_security_headers(); self.end_headers(); return
             tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
@@ -5460,6 +6181,8 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Stream Folder as ZIP Archive ──
         if path == "/api/zip":
+            if not self.is_authenticated():
+                self.send_response(401); self.send_security_headers(); self.end_headers(); return
             tab = qs.get("tab", ["recv"])[0] or qs.get("target", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
@@ -5599,8 +6322,8 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
-        # ── Intercept Authentication Routes ──
-        if auth and path in ("/api/auth", "/api/login", "/api/logout"):
+        # ── Intercept Authentication & Session Management Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/sessions", "/api/revoke_session", "/api/change_password"):
             content_len = safe_int(self.headers.get("Content-Length", 0))
             body_bytes = self.rfile.read(content_len) if content_len > 0 else b""
             body_data = {}
@@ -5619,6 +6342,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Resumable Chunked Upload Protocol ──
         if path == "/api/upload":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to upload files."}, status=401)
+                return
             rel = qs.get("path", ["upload"])[0]
             offset = safe_int(qs.get("offset", [0]))
             target_type = qs.get("target", ["recv"])[0]
@@ -5814,6 +6540,11 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
 def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
     """Instantiate and configure the multi-threaded HTTP server."""
+    if isinstance(host, int) and isinstance(port, str):
+        host, port = port, host
+    elif isinstance(host, int):
+        port = host
+        host = "0.0.0.0"
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), TurboShareHandler)
     server.daemon_threads = True

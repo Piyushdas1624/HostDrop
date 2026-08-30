@@ -31,6 +31,7 @@ from typing import Optional, Tuple, Dict, List, Any
 
 # ── Configuration Constants ───────────────────────────────────────────────────
 CONFIG_FILE = ".env"
+SESSIONS_FILE = ".sessions.json"
 SESSION_COOKIE_NAME = "turboshare_session"
 DEFAULT_ITERATIONS = 600_000
 SESSION_TTL_DAYS = 30
@@ -175,6 +176,153 @@ class SecurityConfig:
         return hmac.compare_digest(key.strip(), self.access_key.strip())
 
 
+def parse_device_info(user_agent: str) -> str:
+    """Parse user-agent string into human-friendly device and browser representation."""
+    ua = (user_agent or "").lower()
+    if not ua:
+        return "🌐 Browser / Web Client"
+
+    # OS / Hardware Platform
+    os_name = "Desktop"
+    if "iphone" in ua:
+        os_name = "📱 Apple iPhone"
+    elif "ipad" in ua:
+        os_name = "📱 Apple iPad"
+    elif "android" in ua:
+        os_name = "📱 Android Phone"
+    elif "windows nt 10" in ua or "windows nt 11" in ua or "windows" in ua:
+        os_name = "💻 Windows PC"
+    elif "macintosh" in ua or "mac os" in ua:
+        os_name = "💻 Apple Mac"
+    elif "linux" in ua:
+        os_name = "💻 Linux PC"
+
+    # Browser Engine / Client
+    browser = "Browser"
+    if "edg/" in ua or "edg" in ua:
+        browser = "Microsoft Edge"
+    elif "chrome/" in ua and "edg" not in ua:
+        browser = "Google Chrome"
+    elif "safari/" in ua and "chrome" not in ua:
+        browser = "Apple Safari"
+    elif "firefox/" in ua:
+        browser = "Mozilla Firefox"
+    elif "curl" in ua or "python" in ua or "bot" in ua:
+        browser = "API Client"
+
+    return f"{os_name} · {browser}"
+
+
+def parse_location(handler: Any) -> str:
+    """Extract location from Cloudflare headers or fallback to connection origin."""
+    if not handler:
+        return "Unknown"
+    headers = getattr(handler, "headers", {}) or {}
+    country = str(headers.get("CF-IPCountry", "")).strip()
+    city = str(headers.get("CF-IPCity", "")).strip()
+    if city and country:
+        return f"{city}, {country}"
+    if country:
+        return country
+    peer = getattr(handler, "client_address", ("", 0))[0]
+    peer_str = str(peer)
+    if peer_str in ("127.0.0.1", "::1", "localhost") or peer_str.startswith("127."):
+        return "Host Localhost"
+    if peer_str.startswith("192.168.") or peer_str.startswith("10.") or peer_str.startswith("172."):
+        return "Local Network (LAN)"
+    return "Remote Internet"
+
+
+class SessionRegistry:
+    """
+    Thread-safe persistent registry of active and revoked remote sessions.
+    Maintains session history with IP, device, location, and timestamps.
+    """
+
+    def __init__(self, storage_path: str = SESSIONS_FILE):
+        self.storage_path = storage_path
+        self.lock = threading.Lock()
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.revoked_ids: set = set()
+        self.load()
+
+    def load(self) -> None:
+        with self.lock:
+            if os.path.exists(self.storage_path):
+                try:
+                    with open(self.storage_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        self.sessions = data.get("sessions", {})
+                        self.revoked_ids = set(data.get("revoked_ids", []))
+                except Exception as e:
+                    print(f"[AUTH WARNING] Could not load session registry: {e}")
+
+    def save(self) -> None:
+        try:
+            with open(self.storage_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "sessions": self.sessions,
+                    "revoked_ids": list(self.revoked_ids)
+                }, f, indent=2)
+        except Exception as e:
+            print(f"[AUTH ERROR] Could not save session registry: {e}")
+
+    def register(self, session_id: str, client_ip: str = "", user_agent: str = "", location: str = "") -> None:
+        with self.lock:
+            now = int(time.time())
+            self.sessions[session_id] = {
+                "id": session_id,
+                "ip": client_ip or "Unknown",
+                "device": parse_device_info(user_agent),
+                "location": location or "Unknown",
+                "user_agent": (user_agent or "")[:150],
+                "issued_at": now,
+                "last_active": now,
+                "revoked": False
+            }
+            self.save()
+
+    def touch(self, session_id: str) -> None:
+        with self.lock:
+            if session_id in self.sessions and not self.sessions[session_id].get("revoked"):
+                self.sessions[session_id]["last_active"] = int(time.time())
+
+    def is_revoked(self, session_id: str) -> bool:
+        with self.lock:
+            if session_id in self.revoked_ids:
+                return True
+            sess = self.sessions.get(session_id)
+            return bool(sess and sess.get("revoked"))
+
+    def revoke(self, session_id: str) -> bool:
+        with self.lock:
+            self.revoked_ids.add(session_id)
+            if session_id in self.sessions:
+                self.sessions[session_id]["revoked"] = True
+            self.save()
+            return True
+
+    def revoke_all(self) -> int:
+        with self.lock:
+            count = 0
+            for sid in self.sessions:
+                if not self.sessions[sid].get("revoked"):
+                    self.sessions[sid]["revoked"] = True
+                    count += 1
+                self.revoked_ids.add(sid)
+            self.save()
+            return count
+
+    def list_sessions(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            result = list(self.sessions.values())
+            result.sort(key=lambda s: s.get("last_active", 0), reverse=True)
+            return result
+
+
+GLOBAL_SESSION_REGISTRY = SessionRegistry()
+
+
 class SessionManager:
     """
     Manages creation and stateless cryptographic verification of persistent
@@ -187,8 +335,8 @@ class SessionManager:
     def update_secret_key(self, secret_key: str) -> None:
         self.secret_key = secret_key
 
-    def create_token(self, user_agent: str = "", ttl_days: int = SESSION_TTL_DAYS) -> str:
-        """Generate a cryptographically signed stateless session token."""
+    def create_token(self, client_ip: str = "", user_agent: str = "", location: str = "", ttl_days: int = SESSION_TTL_DAYS) -> str:
+        """Generate a cryptographically signed stateless session token and register it."""
         version = "v1"
         session_id = secrets.token_hex(16)
         issued_at = int(time.time())
@@ -196,10 +344,14 @@ class SessionManager:
         ua_hash = hashlib.sha256((user_agent or "").encode("utf-8")).hexdigest()[:16]
         payload = f"{version}.{session_id}.{issued_at}.{expires_at}.{ua_hash}"
         signature = hmac.new(self.secret_key.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        
+        # Register in session registry
+        GLOBAL_SESSION_REGISTRY.register(session_id, client_ip=client_ip, user_agent=user_agent, location=location)
+        
         return f"{payload}.{signature}"
 
     def verify_token(self, token: str, user_agent: str = "") -> bool:
-        """Verify session token signature, expiration, and user agent fingerprint in constant time."""
+        """Verify session token signature, expiration, user agent fingerprint, and revocation in constant time."""
         if not token or not self.secret_key:
             return False
         try:
@@ -231,6 +383,13 @@ class SessionManager:
                 expected_ua_hash = hashlib.sha256(user_agent.encode("utf-8")).hexdigest()[:16]
                 if not hmac.compare_digest(ua_hash, expected_ua_hash):
                     return False
+
+            # Check revocation in session registry
+            if GLOBAL_SESSION_REGISTRY.is_revoked(session_id):
+                return False
+
+            # Update last_active
+            GLOBAL_SESSION_REGISTRY.touch(session_id)
 
             return True
         except Exception:
@@ -369,9 +528,69 @@ def verify_access_key(key: str) -> bool:
     """Verify bookmark access key in constant time."""
     return GLOBAL_SECURITY_CONFIG.verify_access_key(key)
 
-def create_session_token(client_ip: str = "", user_agent: str = "") -> str:
-    """Create a persistent signed session token."""
-    return get_session_manager().create_token(user_agent=user_agent)
+def get_session_registry() -> SessionRegistry:
+    return GLOBAL_SESSION_REGISTRY
+
+def list_sessions() -> List[Dict[str, Any]]:
+    return GLOBAL_SESSION_REGISTRY.list_sessions()
+
+def revoke_session(session_id: str) -> bool:
+    return GLOBAL_SESSION_REGISTRY.revoke(session_id)
+
+def revoke_all_sessions() -> int:
+    return GLOBAL_SESSION_REGISTRY.revoke_all()
+
+def change_master_password(new_password: str, revoke_all_sessions: bool = True) -> Tuple[bool, str]:
+    """
+    Update master passphrase, re-hash with PBKDF2-HMAC-SHA256, write to .env,
+    and optionally revoke all active remote sessions.
+    """
+    cleaned = new_password.strip()
+    if len(cleaned) < 6:
+        return False, "Master passcode must be at least 6 characters long."
+
+    new_hash = hash_password(cleaned)
+    GLOBAL_SECURITY_CONFIG.password_hash = new_hash
+    GLOBAL_SECURITY_CONFIG.raw_password = cleaned
+
+    env_path = GLOBAL_SECURITY_CONFIG.env_path
+    lines = []
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"[AUTH ERROR] Failed reading {env_path}: {e}")
+
+    new_lines = []
+    hash_written = False
+    for line in lines:
+        if line.strip().startswith("TURBOSHARE_PASSWORD_HASH="):
+            new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
+            hash_written = True
+        elif line.strip().startswith("APP_PASSWORD="):
+            continue
+        else:
+            new_lines.append(line)
+
+    if not hash_written:
+        new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
+
+    try:
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        return False, f"Could not write to {env_path}: {e}"
+
+    revoked_count = 0
+    if revoke_all_sessions:
+        revoked_count = GLOBAL_SESSION_REGISTRY.revoke_all()
+
+    return True, f"Master passcode successfully updated. {revoked_count} active remote session(s) revoked."
+
+def create_session_token(client_ip: str = "", user_agent: str = "", location: str = "") -> str:
+    """Create a persistent signed session token and register metadata."""
+    return get_session_manager().create_token(client_ip=client_ip, user_agent=user_agent, location=location)
 
 def verify_session_token(token: str, client_ip: str = "", user_agent: str = "") -> bool:
     """Verify persistent signed session token."""
@@ -525,7 +744,8 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
         if verify_access_key(key):
             record_login_success(client_ip)
             ua = handler.headers.get("User-Agent", "") if hasattr(handler, "headers") else ""
-            token = create_session_token(client_ip=client_ip, user_agent=ua)
+            loc = parse_location(handler)
+            token = create_session_token(client_ip=client_ip, user_agent=ua, location=loc)
             cookie_hdr = build_session_cookie(token, is_https=is_https)
 
             # Issue HTTP 303 PRG Clean Redirect
@@ -580,7 +800,8 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
         if authenticated:
             record_login_success(client_ip)
             ua = handler.headers.get("User-Agent", "") if hasattr(handler, "headers") else ""
-            token = create_session_token(client_ip=client_ip, user_agent=ua)
+            loc = parse_location(handler)
+            token = create_session_token(client_ip=client_ip, user_agent=ua, location=loc)
             cookie_hdr = build_session_cookie(token, is_https=is_https)
 
             payload = json.dumps({"success": True, "status": "ok", "token": token}).encode("utf-8")
@@ -604,6 +825,24 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
 
     # 3. Logout (/api/logout)
     if path == "/api/logout":
+        # Extract session_id and revoke server-side
+        cookie_header = handler.headers.get("Cookie", "") if hasattr(handler, "headers") else ""
+        if cookie_header:
+            try:
+                c = cookies.SimpleCookie()
+                c.load(cookie_header)
+                tok = None
+                if SESSION_COOKIE_NAME in c:
+                    tok = c[SESSION_COOKIE_NAME].value
+                elif "ts_session" in c:
+                    tok = c["ts_session"].value
+                if tok:
+                    tok_parts = tok.split(".")
+                    if len(tok_parts) >= 2:
+                        GLOBAL_SESSION_REGISTRY.revoke(tok_parts[1])
+            except Exception:
+                pass
+
         cookie_hdr = f"{SESSION_COOKIE_NAME}=deleted; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
         payload = json.dumps({"success": True, "logged_out": True}).encode("utf-8")
         handler.send_response(200)
@@ -619,6 +858,82 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
         authed = is_authenticated(handler)
         payload = json.dumps({"authenticated": authed}).encode("utf-8")
         handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    # 5. List Sessions (/api/sessions) - Strictly Host Only
+    if path == "/api/sessions":
+        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
+        if not is_host:
+            payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
+            handler.send_response(403)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return True
+
+        sessions = GLOBAL_SESSION_REGISTRY.list_sessions()
+        payload = json.dumps({"success": True, "sessions": sessions}).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    # 6. Revoke Remote Session (/api/revoke_session) - Strictly Host Only
+    if path == "/api/revoke_session":
+        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
+        if not is_host:
+            payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
+            handler.send_response(403)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return True
+
+        target_id = body_data.get("session_id", "").strip() if body_data else ""
+        revoke_all = bool(body_data.get("all", False)) if body_data else False
+        if revoke_all:
+            count = GLOBAL_SESSION_REGISTRY.revoke_all()
+            msg = f"All active remote sessions ({count}) have been revoked."
+        elif target_id:
+            GLOBAL_SESSION_REGISTRY.revoke(target_id)
+            msg = f"Session {target_id[:8]}... successfully revoked."
+        else:
+            msg = "No session ID specified."
+
+        payload = json.dumps({"success": True, "message": msg}).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    # 7. Change Master Password (/api/change_password) - Strictly Host Only
+    if path == "/api/change_password":
+        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
+        if not is_host:
+            payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
+            handler.send_response(403)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return True
+
+        new_pwd = body_data.get("new_password", "").strip() if body_data else ""
+        revoke_all = bool(body_data.get("revoke_sessions", True)) if body_data else True
+        ok, msg = change_master_password(new_pwd, revoke_all_sessions=revoke_all)
+        status = 200 if ok else 400
+        payload = json.dumps({"success": ok, "message": msg}).encode("utf-8")
+        handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(payload)))
         handler.end_headers()
