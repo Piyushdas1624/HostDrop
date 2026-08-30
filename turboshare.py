@@ -5,6 +5,7 @@ import json
 import socket
 import shutil
 import zipfile
+import tempfile
 import mimetypes
 import urllib.parse
 import html
@@ -56,6 +57,7 @@ SERVER_PORT = 8080
 GLOBAL_TUNNEL_URL = ""
 GLOBAL_TUNNEL_PROVIDER = "none"
 TUNNEL_PROC = None
+REQUIRE_AUTH = True
 REQUIRE_AUTH_ON_LAN = False
 REMOTE_FULL_DRIVE_ACCESS = False
 
@@ -127,11 +129,30 @@ class TunnelManager:
 
                 t = threading.Thread(target=monitor_cf, daemon=True)
                 t.start()
-                t.join(timeout=10)
+                t.join(timeout=30)
                 if GLOBAL_TUNNEL_URL:
                     return GLOBAL_TUNNEL_URL
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
             except Exception:
-                pass
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
 
         # Fallback to Pinggy SSH
         if provider in ("auto", "pinggy") and shutil.which("ssh"):
@@ -155,11 +176,30 @@ class TunnelManager:
 
                 t = threading.Thread(target=monitor_pinggy, daemon=True)
                 t.start()
-                t.join(timeout=10)
+                t.join(timeout=30)
                 if GLOBAL_TUNNEL_URL:
                     return GLOBAL_TUNNEL_URL
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
             except Exception:
-                pass
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
 
         return ""
 
@@ -267,6 +307,20 @@ def get_local_ip_set():
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FILESYSTEM & HOST INTEGRATION HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+def safe_int(val, default: int = 0) -> int:
+    """Safely convert a value to an integer without raising ValueError or TypeError."""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, (list, tuple)):
+            if not val:
+                return default
+            val = val[0]
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def disk_info(path):
     """Calculate free, total, used percentage and formatted metrics for a path."""
     if not path:
@@ -323,8 +377,9 @@ def sanitize_path_for_client(path: str, is_admin: bool = False) -> str:
 
     if CURRENT_USER and CURRENT_USER in norm:
         norm = norm.replace(f"\\Users\\{CURRENT_USER}", "\\Users\\[User]")
-        norm = norm.replace(f"/home/{CURRENT_USER}", "/home/[User]")
         norm = norm.replace(f"/Users/{CURRENT_USER}", "/Users/[User]")
+        norm = norm.replace(f"\\home\\{CURRENT_USER}", "\\home\\[User]")
+        norm = norm.replace(f"/home/{CURRENT_USER}", "/home/[User]")
 
     return norm
 
@@ -5201,7 +5256,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
     def is_authenticated(self) -> bool:
         """Verify caller session against auth module."""
-        global REQUIRE_AUTH_ON_LAN
+        global REQUIRE_AUTH, REQUIRE_AUTH_ON_LAN
+        if not REQUIRE_AUTH:
+            return True
         if self.is_physical_localhost() and not REQUIRE_AUTH_ON_LAN:
             return True
         if auth:
@@ -5219,7 +5276,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         """Verify whether request originated physically from localhost (not via tunnel)."""
         peer = self.client_address[0]
         is_loopback = peer in ("127.0.0.1", "::1", "localhost") or peer.startswith("127.")
-        has_tunnel_header = bool(self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For"))
+        has_tunnel_header = bool(self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP"))
         return is_loopback and not has_tunnel_header
 
     def do_GET(self):
@@ -5310,12 +5367,23 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if tab == "share" else UPLOAD_DIR
+            is_admin = self.is_authenticated()
             if not base or not os.path.exists(base):
-                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                self.send_json({
+                    "items": [],
+                    "path": rel,
+                    "disk": disk_info(base) if base else {},
+                    "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
+                })
                 return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
-                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                self.send_json({
+                    "items": [],
+                    "path": rel,
+                    "disk": disk_info(base),
+                    "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
+                })
                 return
 
             items = []
@@ -5342,7 +5410,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
                 "items": items,
                 "path": rel,
                 "disk": disk_info(target),
-                "base": base
+                "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
             })
             return
 
@@ -5397,44 +5465,79 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             with STATE_LOCK:
                 base = HOST_SHARE if tab == "share" else UPLOAD_DIR
             if not base:
-                self.send_response(404); self.end_headers(); return
+                self.send_response(404); self.send_security_headers(); self.end_headers(); return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
-                self.send_response(404); self.end_headers(); return
+                self.send_response(404); self.send_security_headers(); self.end_headers(); return
 
             zip_name = (os.path.basename(target) or "turboshare_export") + ".zip"
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(target):
-                    for d in dirs:
-                        dir_full = os.path.join(root, d)
-                        arc_d = os.path.relpath(dir_full, target).replace("\\", "/") + "/"
-                        zf.writestr(arc_d, "")
-                    for f in files:
-                        full_f = os.path.join(root, f)
-                        arc_f = os.path.relpath(full_f, target).replace("\\", "/")
-                        try:
-                            zf.write(full_f, arc_f)
-                        except (PermissionError, OSError):
-                            pass
 
-            raw_zip = buf.getvalue()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Length", str(len(raw_zip)))
-            safe_ascii_zip = zip_name.encode("ascii", "ignore").decode("ascii").strip() or "archive.zip"
-            fname_esc = urllib.parse.quote(zip_name)
-            self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_zip}"; filename*=UTF-8\'\'{fname_esc}')
-            self.send_security_headers()
-            self.end_headers()
+            # Create a temporary file on disk rather than holding gigabytes in RAM (prevents OOM)
+            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+            temp_zip_path = temp_zip.name
+            temp_zip.close()
+
             try:
-                self.wfile.write(raw_zip)
+                file_count = 0
+                total_bytes = 0
+                with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, dirs, files in os.walk(target):
+                        # Enforce recursion depth limit
+                        rel_root = os.path.relpath(root, target)
+                        depth = len(rel_root.replace("\\", "/").split("/")) if rel_root != "." else 0
+                        if depth > MAX_ZIP_DEPTH:
+                            dirs.clear()
+                            continue
+
+                        for d in dirs:
+                            dir_full = os.path.join(root, d)
+                            arc_d = os.path.relpath(dir_full, target).replace("\\", "/") + "/"
+                            zf.writestr(arc_d, "")
+
+                        for f in files:
+                            if file_count >= MAX_ZIP_FILES:
+                                break
+                            full_f = os.path.join(root, f)
+                            arc_f = os.path.relpath(full_f, target).replace("\\", "/")
+                            try:
+                                sz = os.path.getsize(full_f)
+                                if total_bytes + sz > MAX_ZIP_SIZE:
+                                    break
+                                zf.write(full_f, arc_f)
+                                file_count += 1
+                                total_bytes += sz
+                            except (PermissionError, OSError):
+                                pass
+
+                zip_size = os.path.getsize(temp_zip_path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(zip_size))
+                safe_ascii_zip = zip_name.encode("ascii", "ignore").decode("ascii").strip() or "archive.zip"
+                fname_esc = urllib.parse.quote(zip_name)
+                self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_zip}"; filename*=UTF-8\'\'{fname_esc}')
+                self.send_security_headers()
+                self.end_headers()
+
+                # Stream from disk file in 64KB chunks (constant O(1) memory)
+                with open(temp_zip_path, "rb") as f:
+                    while chunk := f.read(64 * 1024):
+                        self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            finally:
+                try:
+                    if os.path.exists(temp_zip_path):
+                        os.remove(temp_zip_path)
+                except Exception:
+                    pass
             return
 
         # ── Trigger Native OS Folder Picker ──
         if path == "/api/pick_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to pick folders."}, status=401)
+                return
             if not self.is_physical_localhost():
                 self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
                 return
@@ -5453,6 +5556,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open Folder in Host OS Explorer ──
         if path == "/api/open_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
+                return
             if not self.is_physical_localhost():
                 self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
                 return
@@ -5495,7 +5601,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Intercept Authentication Routes ──
         if auth and path in ("/api/auth", "/api/login", "/api/logout"):
-            content_len = int(self.headers.get("Content-Length", 0))
+            content_len = safe_int(self.headers.get("Content-Length", 0))
             body_bytes = self.rfile.read(content_len) if content_len > 0 else b""
             body_data = {}
             if body_bytes:
@@ -5514,25 +5620,43 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         # ── Resumable Chunked Upload Protocol ──
         if path == "/api/upload":
             rel = qs.get("path", ["upload"])[0]
-            offset = int(qs.get("offset", [0])[0])
+            offset = safe_int(qs.get("offset", [0]))
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
             full = safe_path(base, rel)
             if not full:
-                self.send_response(403); self.end_headers(); return
-
-            # Pre-flight check disk space buffer (500 MB)
-            di = disk_info(base)
-            if di.get("free_bytes", 0) > 0 and di.get("free_bytes", 0) < MIN_FREE_DISK_BUFFER:
-                self.send_json({"success": False, "error": "insufficient_storage", "message": "Host disk space is low (less than 500 MB remaining)."}, status=507)
-                return
+                self.send_response(403); self.send_security_headers(); self.end_headers(); return
 
             try:
-                os.makedirs(os.path.dirname(full), exist_ok=True)
-                content_len = int(self.headers.get("Content-Length", 0))
+                content_len = safe_int(self.headers.get("Content-Length", 0))
+                if content_len > MAX_UPLOAD_SIZE:
+                    self.send_json({"success": False, "status": "error", "error": f"File size exceeds maximum allowed limit ({MAX_UPLOAD_SIZE // (1024**3)} GB)."}, status=413)
+                    return
+
+                # Pre-flight check free disk space (content_len + MIN_FREE_DISK_BUFFER)
+                target_dir = os.path.dirname(full)
+                os.makedirs(target_dir, exist_ok=True)
+                try:
+                    free_disk = shutil.disk_usage(target_dir).free
+                    if free_disk < content_len + MIN_FREE_DISK_BUFFER:
+                        self.send_json({"success": False, "status": "error", "error": "Insufficient host storage space (500 MB buffer required)."}, status=507)
+                        return
+                except Exception:
+                    pass
+
+                # Offset bounds validation
+                if offset > 0 and os.path.exists(full):
+                    current_size = os.path.getsize(full)
+                    if offset > current_size:
+                        self.send_json({"success": False, "status": "error", "error": "Invalid resume offset beyond existing file length."}, status=400)
+                        return
+                elif offset > 0 and not os.path.exists(full):
+                    self.send_json({"success": False, "status": "error", "error": "Cannot resume non-existent file."}, status=400)
+                    return
+
                 bytes_written = 0
-                chunk_size = 1024 * 1024  # 1 MB optimal streaming chunk
+                chunk_size = 64 * 1024  # 64 KB streaming chunk
 
                 if offset == 0:
                     with open(full, "wb") as f:
@@ -5545,26 +5669,27 @@ class TurboShareHandler(BaseHTTPRequestHandler):
                             bytes_written += len(chunk)
                 else:
                     # Resuming partial upload with atomic seek and truncate
-                    if os.path.exists(full):
-                        with open(full, "r+b") as f:
-                            f.seek(offset)
-                            f.truncate(offset)
-                            while bytes_written < content_len:
-                                to_read = min(chunk_size, content_len - bytes_written)
-                                chunk = self.rfile.read(to_read)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                bytes_written += len(chunk)
-                    else:
-                        with open(full, "wb") as f:
-                            while bytes_written < content_len:
-                                to_read = min(chunk_size, content_len - bytes_written)
-                                chunk = self.rfile.read(to_read)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                bytes_written += len(chunk)
+                    with open(full, "r+b") as f:
+                        f.seek(offset)
+                        f.truncate(offset)
+                        while bytes_written < content_len:
+                            to_read = min(chunk_size, content_len - bytes_written)
+                            chunk = self.rfile.read(to_read)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            bytes_written += len(chunk)
+
+                # Verify full payload received without premature connection drop
+                if content_len > 0 and bytes_written < content_len:
+                    self.send_json({
+                        "success": False,
+                        "status": "error",
+                        "error": "Upload truncated or connection closed prematurely.",
+                        "received": bytes_written,
+                        "expected": content_len
+                    }, status=400)
+                    return
 
                 self.send_json({
                     "success": True,
@@ -5583,12 +5708,16 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             if not self.is_authenticated():
                 self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to change host storage paths."}, status=401)
                 return
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len)
+            content_len = safe_int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
-                data = json.loads(body.decode("utf-8"))
+                data = json.loads(body.decode("utf-8")) if body else {}
                 target_type = data.get("target") or data.get("type") or "recv"
-                target_path = os.path.abspath(data.get("path", "").strip().strip("'\""))
+                raw_path = data.get("path", "").strip().strip("'\"")
+                if not raw_path:
+                    self.send_json({"success": False, "status": "error", "error": "Path cannot be empty."}, status=400)
+                    return
+                target_path = os.path.abspath(raw_path)
 
                 if not os.path.exists(target_path):
                     os.makedirs(target_path, exist_ok=True)
@@ -5617,14 +5746,18 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             if not self.is_authenticated():
                 self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to create folders."}, status=401)
                 return
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len)
+            content_len = safe_int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
-                data = json.loads(body.decode("utf-8"))
+                data = json.loads(body.decode("utf-8")) if body else {}
                 parent = data.get("parent", "").strip()
                 name = data.get("name", "").strip()
+                raw_path = data.get("path", "").strip()
                 if not parent or not name:
-                    full_p = os.path.abspath(data.get("path", "").strip())
+                    if not raw_path:
+                        self.send_json({"success": False, "status": "error", "error": "Folder path cannot be empty."}, status=400)
+                        return
+                    full_p = os.path.abspath(raw_path)
                 else:
                     full_p = os.path.abspath(os.path.join(parent, name))
 
@@ -5636,6 +5769,9 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Trigger Native Picker (POST) ──
         if path == "/api/pick_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to pick folders."}, status=401)
+                return
             if not self.is_physical_localhost():
                 self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
                 return
@@ -5648,10 +5784,13 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open in OS (POST) ──
         if path == "/api/open_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
+                return
             if not self.is_physical_localhost():
                 self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
                 return
-            content_len = int(self.headers.get("Content-Length", 0))
+            content_len = safe_int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
                 data = json.loads(body.decode("utf-8")) if body else {}
@@ -5673,6 +5812,14 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         pass
 
 
+def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
+    """Instantiate and configure the multi-threaded HTTP server."""
+    ThreadingHTTPServer.allow_reuse_address = True
+    server = ThreadingHTTPServer((host, port), TurboShareHandler)
+    server.daemon_threads = True
+    return server
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  APPLICATION BOOTSTRAP & SERVER LAUNCHER
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5683,10 +5830,35 @@ def main():
         os.path.expanduser("~"), "Downloads", "TurboShare"
     )
 
-    if len(sys.argv) > 1:
-        chosen = sys.argv[1].strip().strip("'\"")
-    else:
-        chosen = default_dir
+    chosen = default_dir
+    tunnel_prov = os.environ.get("TUNNEL_PROVIDER", "auto").strip().lower()
+
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i].strip()
+        if arg in ("--tunnel", "-t") and i + 1 < len(sys.argv):
+            tunnel_prov = sys.argv[i + 1].strip().lower()
+            i += 2
+        elif arg.startswith("--tunnel="):
+            tunnel_prov = arg.split("=", 1)[1].strip().lower()
+            i += 1
+        elif arg in ("--port", "-p") and i + 1 < len(sys.argv):
+            try:
+                SERVER_PORT = int(sys.argv[i + 1].strip())
+            except ValueError:
+                pass
+            i += 2
+        elif arg.startswith("--port="):
+            try:
+                SERVER_PORT = int(arg.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+            i += 1
+        elif not arg.startswith("-"):
+            chosen = arg.strip("'\"")
+            i += 1
+        else:
+            i += 1
 
     UPLOAD_DIR = os.path.abspath(chosen)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -5696,7 +5868,6 @@ def main():
         auth.init_config()
 
     # Launch Global Tunnel if configured
-    tunnel_prov = os.environ.get("TUNNEL_PROVIDER", "auto").strip().lower()
     if tunnel_prov != "none":
         print(f"[*] Initializing Global Remote Access tunnel (provider={tunnel_prov})...")
         t = threading.Thread(target=lambda: TunnelManager.start(SERVER_PORT, provider=tunnel_prov), daemon=True)
@@ -5728,9 +5899,7 @@ def main():
         except Exception:
             pass
 
-    ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), TurboShareHandler)
-    server.daemon_threads = True
+    server = create_server("0.0.0.0", SERVER_PORT)
 
     try:
         server.serve_forever()
