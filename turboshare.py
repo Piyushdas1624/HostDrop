@@ -5,6 +5,7 @@ import json
 import socket
 import shutil
 import zipfile
+import tempfile
 import mimetypes
 import urllib.parse
 import html
@@ -36,11 +37,188 @@ try:
 except ImportError:
     qrcode = None
 
-# ── Global State & Thread Synchronization ───────────────────────────────────────
+# ── Authentication & Security Engine ──────────────────────────────────────────
+try:
+    import auth
+except ImportError:
+    auth = None
+
+import re
+import atexit
+import getpass
+
+# ── Global State & Invariant Configuration ─────────────────────────────────────
 STATE_LOCK = threading.Lock()
 UPLOAD_DIR = ""   # Where incoming files sent to the PC are stored (Inbox tab)
 HOST_SHARE = ""   # Folder shared by PC for others to browse/download (Library tab)
 SERVER_PORT = 8080
+
+# Global Tunnel State
+GLOBAL_TUNNEL_URL = ""
+GLOBAL_TUNNEL_PROVIDER = "none"
+TUNNEL_PROC = None
+REQUIRE_AUTH = True
+REQUIRE_AUTH_ON_LAN = False
+REMOTE_FULL_DRIVE_ACCESS = False
+
+# Resource & DoS Protection Limits
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024 * 1024       # 50 GB per file
+MAX_ZIP_SIZE = 10 * 1024 * 1024 * 1024          # 10 GB max folder zip export
+MAX_ZIP_FILES = 10_000                          # Max entries in a single zip archive
+MAX_ZIP_DEPTH = 25                              # Max folder recursion depth
+MIN_FREE_DISK_BUFFER = 500 * 1024 * 1024        # 500 MB required free disk margin
+
+# Windows Reserved Device Filenames
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+}
+
+try:
+    CURRENT_USER = getpass.getuser()
+except Exception:
+    CURRENT_USER = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+USER_HOME = os.path.expanduser("~")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  GLOBAL TUNNEL ORCHESTRATOR (Cloudflare Tunnel & Pinggy SSH)
+# ═══════════════════════════════════════════════════════════════════════════════
+class TunnelManager:
+    @staticmethod
+    def get_cloudflared_path():
+        p = shutil.which("cloudflared")
+        if p:
+            return p
+        candidates = [
+            r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
+            r"C:\Program Files\cloudflared\cloudflared.exe",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bin", "cloudflared.exe")
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return None
+
+    @staticmethod
+    def start(port=8080, provider="auto"):
+        global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER, TUNNEL_PROC
+        if provider == "none":
+            return ""
+
+        cf_path = TunnelManager.get_cloudflared_path()
+        if provider in ("auto", "cloudflare") and cf_path:
+            cmd = [cf_path, "tunnel", "--url", f"http://127.0.0.1:{port}"]
+            try:
+                TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+                cf_regex = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+
+                def monitor_cf():
+                    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
+                    for line in TUNNEL_PROC.stderr:
+                        m = cf_regex.search(line)
+                        if m and not GLOBAL_TUNNEL_URL:
+                            with STATE_LOCK:
+                                GLOBAL_TUNNEL_URL = m.group(0)
+                                GLOBAL_TUNNEL_PROVIDER = "cloudflare"
+                            print(f"\n  [+] Cloudflare Tunnel established: {GLOBAL_TUNNEL_URL}")
+                            if auth:
+                                print(f"  [+] Global Magic Link: {GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}\n")
+                            break
+
+                t = threading.Thread(target=monitor_cf, daemon=True)
+                t.start()
+                t.join(timeout=30)
+                if GLOBAL_TUNNEL_URL:
+                    return GLOBAL_TUNNEL_URL
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
+            except Exception:
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
+
+        # Fallback to Pinggy SSH
+        if provider in ("auto", "pinggy") and shutil.which("ssh"):
+            cmd = ["ssh", "-p", "443", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30", "-R", f"0:localhost:{port}", "a.pinggy.io"]
+            try:
+                TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+                pinggy_regex = re.compile(r"https://[a-zA-Z0-9-]+\.a?\.?pinggy\.link")
+
+                def monitor_pinggy():
+                    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
+                    for line in TUNNEL_PROC.stdout:
+                        m = pinggy_regex.search(line)
+                        if m and not GLOBAL_TUNNEL_URL:
+                            with STATE_LOCK:
+                                GLOBAL_TUNNEL_URL = m.group(0)
+                                GLOBAL_TUNNEL_PROVIDER = "pinggy"
+                            print(f"\n  [+] Pinggy Tunnel established: {GLOBAL_TUNNEL_URL}")
+                            if auth:
+                                print(f"  [+] Global Magic Link: {GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}\n")
+                            break
+
+                t = threading.Thread(target=monitor_pinggy, daemon=True)
+                t.start()
+                t.join(timeout=30)
+                if GLOBAL_TUNNEL_URL:
+                    return GLOBAL_TUNNEL_URL
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
+            except Exception:
+                if TUNNEL_PROC:
+                    try:
+                        TUNNEL_PROC.terminate()
+                        TUNNEL_PROC.wait(timeout=2)
+                    except Exception:
+                        try:
+                            TUNNEL_PROC.kill()
+                        except Exception:
+                            pass
+                    TUNNEL_PROC = None
+
+        return ""
+
+    @staticmethod
+    def stop():
+        global TUNNEL_PROC
+        if TUNNEL_PROC:
+            try:
+                TUNNEL_PROC.terminate()
+                TUNNEL_PROC.wait(timeout=2)
+            except Exception:
+                try:
+                    TUNNEL_PROC.kill()
+                except Exception:
+                    pass
+            TUNNEL_PROC = None
+
+atexit.register(TunnelManager.stop)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,6 +307,20 @@ def get_local_ip_set():
 # ═══════════════════════════════════════════════════════════════════════════════
 #  FILESYSTEM & HOST INTEGRATION HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+def safe_int(val, default: int = 0) -> int:
+    """Safely convert a value to an integer without raising ValueError or TypeError."""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, (list, tuple)):
+            if not val:
+                return default
+            val = val[0]
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def disk_info(path):
     """Calculate free, total, used percentage and formatted metrics for a path."""
     if not path:
@@ -168,23 +360,118 @@ def disk_info(path):
         }
 
 
+def sanitize_path_for_client(path: str, is_admin: bool = False) -> str:
+    """
+    Redact host username and sensitive home path structures for remote/guest clients.
+    Exposes full paths only to verified authenticated administrators.
+    """
+    if not path:
+        return ""
+    if is_admin:
+        return path
+
+    norm = os.path.normpath(path)
+    if USER_HOME and norm.startswith(USER_HOME):
+        rel = norm[len(USER_HOME):].lstrip("/\\")
+        return f"~/{rel}".replace("\\", "/")
+
+    if CURRENT_USER and CURRENT_USER in norm:
+        norm = norm.replace(f"\\Users\\{CURRENT_USER}", "\\Users\\[User]")
+        norm = norm.replace(f"/Users/{CURRENT_USER}", "/Users/[User]")
+        norm = norm.replace(f"\\home\\{CURRENT_USER}", "\\home\\[User]")
+        norm = norm.replace(f"/home/{CURRENT_USER}", "/home/[User]")
+
+    return norm
+
+
 def safe_path(base_dir, rel):
     """
-    Prevent directory traversal attacks by ensuring the resolved path
-    is strictly contained inside base_dir.
+    Strict Path Traversal & Safe Path Normalization Engine (Hardened).
+    Defends against:
+    - Relative directory traversal (../, ..\\, mixed slashes, multi-dot)
+    - URL-encoded, double-encoded, multi-encoded traversal (%2e%2e%2f, %252e%252e%252f)
+    - URL-encoded & raw null-byte string poisoning (\\0, %00, %2500)
+    - NTFS Alternate Data Streams (::$DATA, file.txt:stream, %3a, %253a)
+    - UNC network paths (\\\\server\\share, //server/share, \\\\?\\)
+    - Absolute and root-prefixed paths (/etc/passwd, C:\\Windows, \\Windows)
+    - Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    - Symlink and directory junction escapes outside base_dir
     """
-    if not base_dir:
+    if not base_dir or rel is None:
         return None
-    rel = (rel or "").replace("\\", "/").strip("/")
-    safe = os.path.normpath(rel).lstrip("/\\")
-    full = os.path.abspath(os.path.join(base_dir, safe))
-    base_abs = os.path.abspath(base_dir)
-    try:
-        if os.path.commonpath([base_abs, full]) != base_abs:
+
+    rel_str = str(rel)
+
+    # 1. Null-byte rejection before decoding
+    if "\0" in rel_str or "\0" in str(base_dir) or "%00" in rel_str.lower():
+        return None
+
+    # 2. Recursive URL unquoting (up to 5 iterations or until fixed-point)
+    clean_rel = rel_str
+    for _ in range(5):
+        prev = clean_rel
+        clean_rel = urllib.parse.unquote(clean_rel)
+        if clean_rel == prev:
+            break
+
+    # Re-verify null byte poisoning after full unquoting
+    if "\0" in clean_rel or "%00" in clean_rel.lower():
+        return None
+
+    # 3. NTFS Alternate Data Streams (ADS) and drive colon rejection
+    if ":" in clean_rel:
+        return None
+
+    # 4. Strip whitespace
+    stripped = clean_rel.strip()
+    if not stripped and rel_str:
+        return None
+
+    # 5. Reject absolute / root-prefixed / UNC paths
+    if stripped.startswith(("/", "\\")):
+        return None
+
+    # 6. Slash normalization and stripping
+    rel_clean = stripped.replace("\\", "/")
+    norm_rel = os.path.normpath(rel_clean)
+
+    if norm_rel == ".." or norm_rel.startswith("../") or norm_rel.startswith("..\\") or norm_rel.split("/")[0] == "..":
+        return None
+
+    # 7. Check Windows reserved device names across all path segments
+    parts = norm_rel.replace("\\", "/").split("/")
+    for p in parts:
+        if not p:
+            continue
+        seg = p.rstrip(". ")
+        base_name = seg.split(".")[0].strip().upper()
+        if base_name in WINDOWS_RESERVED_NAMES:
             return None
-    except ValueError:
+
+    try:
+        base_abs = os.path.abspath(base_dir)
+        base_real = os.path.realpath(base_abs)
+
+        if norm_rel == ".":
+            return base_real
+
+        full_path = os.path.abspath(os.path.join(base_real, norm_rel))
+
+        if os.path.exists(full_path):
+            full_real = os.path.realpath(full_path)
+        else:
+            parent = os.path.dirname(full_path)
+            parent_real = os.path.realpath(parent)
+            if os.path.commonpath([base_real, parent_real]) != base_real:
+                return None
+            full_real = full_path
+
+        if os.path.commonpath([base_real, full_real]) != base_real:
+            return None
+
+        return full_real
+    except (ValueError, OSError):
         return None
-    return full
 
 
 def get_host_drives():
@@ -2642,6 +2929,130 @@ body {
     min-height: 44px;
   }
 }
+
+/* Security & Remote Sessions UI Elements */
+.badge-count {
+  background: #0284c7;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 4px;
+}
+.remote-auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #34d399;
+  font-weight: 500;
+}
+.remote-auth-pill .btn-logout {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.remote-auth-pill .btn-logout:hover {
+  background: rgba(239, 68, 68, 0.4);
+  color: #fff;
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: pulseAnim 2s infinite;
+}
+@keyframes pulseAnim {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+.sec-card-box {
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.sessions-scroll-table {
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-standard);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.sessions-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.sessions-table th {
+  background: var(--surface-3);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 12px;
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.sessions-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.sessions-table tr:last-child td {
+  border-bottom: none;
+}
+.session-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.session-status-badge.active {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+.session-status-badge.revoked {
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.btn-danger-outline {
+  background: transparent;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #f87171;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+.btn-danger-outline:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: #ef4444;
+}
 </style>
 </head>
 <body>
@@ -2667,6 +3078,12 @@ body {
     </div>
 
     <div class="header-actions">
+      <div id="authStatusBadge"></div>
+      <button class="btn btn-ghost btn-sm host-only-btn" id="btnSecurityModal" onclick="openSecurityModal()" title="View remote sessions, revoke access, and change password" style="display: none;">
+        <svg class="icon" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span class="btn-label">Security &amp; Sessions</span>
+        <span class="badge-count" id="headerSessionCount" style="display: none;">0</span>
+      </button>
       <button class="btn btn-ghost btn-sm" onclick="showGeneralQR()" title="Show Web QR Code">
         <svg class="icon" viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
         <span class="btn-label">QR Connect</span>
@@ -2990,6 +3407,128 @@ body {
   </div>
 </div>
 
+<!-- Master Passcode Authentication Modal -->
+<div class="modal-overlay" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authModalTitle" style="display: none;">
+  <div class="modal-content" style="max-width: 440px;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg class="icon" style="color: #60a5fa;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <span id="authModalTitle">TurboShare Security Passcode</span>
+      </div>
+      <button class="icon-btn-micro" onclick="closeModal('authModal')" aria-label="Close dialog">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" style="padding: 18px 20px; gap: 14px;">
+      <div style="font-size: 13px; color: var(--text-secondary); line-height: 1.5;">
+        Enter the <strong>Master App Passcode</strong> or your <strong>Bookmark Key</strong> to unlock remote storage controls and full access.
+      </div>
+      <div>
+        <label for="authPasswordInput" style="display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-tertiary); margin-bottom: 6px; letter-spacing: 0.5px;">Passcode or Key</label>
+        <input type="password" id="authPasswordInput" placeholder="Enter passcode..." autocomplete="current-password" class="modal-path-input" style="width: 100%; box-sizing: border-box; font-family: var(--font-mono); font-size: 14px; padding: 10px 12px;" onkeydown="if(event.key==='Enter') submitAuthLogin()">
+      </div>
+      <div id="authErrorMsg" style="display: none; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); color: #fca5a5; font-size: 12px;"></div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
+        <button class="btn btn-secondary btn-sm" onclick="closeModal('authModal')">Cancel</button>
+        <button class="btn btn-primary btn-sm" id="authSubmitBtn" onclick="submitAuthLogin()">Unlock Access</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Host Security & Sessions Management Modal (Localhost Host Only) -->
+<div class="modal-overlay" id="securityModal" role="dialog" aria-modal="true" aria-labelledby="securityModalTitle">
+  <div class="modal-content" style="max-width: 680px; max-height: 85vh; display: flex; flex-direction: column;">
+    <div class="modal-header">
+      <div class="modal-title">
+        <svg class="icon" style="color: #38bdf8;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><circle cx="12" cy="12" r="3"/></svg>
+        <span id="securityModalTitle">Host Security &amp; Remote Sessions</span>
+      </div>
+      <button class="icon-btn-micro" onclick="closeModal('securityModal')" aria-label="Close dialog">
+        <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body" style="padding: 16px 20px; gap: 18px; overflow-y: auto; flex: 1;">
+      
+      <!-- Section 0: Active Master Passcode & Security Tip -->
+      <div class="sec-card-box" id="activePasscodeCard">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
+          <div>
+            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+              <span>Active Master Passcode</span>
+              <span id="passcodeTypeBadge" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(56,189,248,0.15); color: #38bdf8; font-weight: 500;">PBKDF2-HMAC-SHA256</span>
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary);">Used by remote devices to unlock TurboShare</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <code id="hostPasscodeDisplay" style="font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: #38bdf8; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); padding: 4px 10px; border-radius: 6px; letter-spacing: 0.5px;">Loading...</code>
+            <button class="btn btn-secondary btn-sm" id="btnCopyPasscode" onclick="copyHostPasscode()" title="Copy Passcode">
+              <svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="btnCopyPasscodeText">Copy</span>
+            </button>
+          </div>
+        </div>
+        <div id="hostPasscodeTip" style="font-size: 12px; color: var(--text-tertiary); background: rgba(255,255,255,0.03); border-left: 3px solid #38bdf8; padding: 6px 10px; border-radius: 0 4px 4px 0; margin-top: 6px;">
+          Tip: We recommend setting your own personal passcode, though your auto-generated code is active and secure.
+        </div>
+      </div>
+
+      <!-- Section 1: Active Remote Sessions -->
+      <div class="sec-card-box">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+          <div>
+            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);">Active Remote Sessions</div>
+            <div style="font-size: 11px; color: var(--text-secondary);">Devices connected via Cloudflare Tunnel or Remote Passcode</div>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn btn-secondary btn-sm" onclick="refreshSessionsList()">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              <span>Refresh</span>
+            </button>
+            <button class="btn-danger-outline btn-sm" onclick="revokeAllSessions()">Revoke All</button>
+          </div>
+        </div>
+
+        <div class="sessions-scroll-table">
+          <table class="sessions-table">
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>IP &amp; Location</th>
+                <th>Issued</th>
+                <th>Last Active</th>
+                <th>Status</th>
+                <th style="text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="sessionsTableBody">
+              <tr><td colspan="6" style="text-align: center; color: var(--text-tertiary); padding: 24px;">Loading active sessions...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Section 2: Change Master Passcode -->
+      <div class="sec-card-box">
+        <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Update Master Passcode</div>
+        <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 14px;">Change the password required for remote access outside this computer</div>
+        
+        <form onsubmit="handleHostPasswordChange(event)" style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <input type="password" id="newMasterPasswordInput" placeholder="Enter new passcode (min 6 characters)..." class="modal-path-input" style="flex: 1; min-width: 220px; font-family: var(--font-mono); font-size: 13px; padding: 9px 12px;" required>
+            <button type="submit" class="btn btn-primary btn-sm" id="btnChangePasswordSubmit">Save Passcode</button>
+          </div>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+            <input type="checkbox" id="chkRevokeOnPassChange" checked style="accent-color: var(--accent);">
+            <span>Automatically revoke all existing remote sessions on password change</span>
+          </label>
+        </form>
+      </div>
+
+    </div>
+  </div>
+</div>
+
 <!-- In-Browser Host Folder Navigator Modal (Linear / Apple Files Aesthetic) -->
 <div class="modal-overlay" id="hostBrowserModal" role="dialog" aria-modal="true" aria-labelledby="hostBrowserModalTitle">
   <div class="modal-content">
@@ -3141,8 +3680,9 @@ body {
           <code class="mono" id="qrHostUrl" style="font-size: 12px; color: var(--text-primary);">http://127.0.0.1:__PORT__</code>
           <button class="btn btn-ghost btn-sm" style="font-size: 11px; padding: 4px 10px;" onclick="copyAddress(document.getElementById('qrHostUrl').textContent, this)">Copy</button>
         </div>
-        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.4;">
-          🔒 <strong>Host Device Only:</strong> This address works exclusively in a browser on this host computer. It <em>cannot</em> be accessed by phones or other devices on your network. (No QR code generated).
+        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.4; display: flex; align-items: flex-start; gap: 6px;">
+          <svg class="icon" style="width: 14px; height: 14px; color: var(--text-tertiary); flex-shrink: 0; margin-top: 1px;" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span><strong>Host Device Only:</strong> This address works exclusively in a browser on this host computer. It <em>cannot</em> be accessed by phones or other devices on your network. (No QR code generated).</span>
         </div>
       </div>
     </div>
@@ -3383,6 +3923,7 @@ window.turboNetInterfaces = __NET_INTERFACES_JSON__;
 
 /* Host vs Guest Role Adaptive State */
 const isHostClient = ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname);
+function isLocalhost() { return isHostClient; }
 
 function applyClientRole() {
   const hostPill = document.getElementById('hostStatusPill');
@@ -3980,6 +4521,12 @@ async function browseModalPath(path) {
   
   try {
     const res = await fetch('/api/browse_host?path=' + encodeURIComponent(path || ''));
+    if (res.status === 401) {
+      closeModal('hostBrowserModal');
+      openAuthModal();
+      showToast('Authentication required to browse PC storage.', 'info');
+      return;
+    }
     const data = await res.json();
     
     activeModalBrowsePath = data.current_path || '';
@@ -4703,8 +5250,322 @@ setInterval(() => {
   }
 }, 5000);
 
+/* ═══════════════════════════════════════════════════════════════════════════════
+   AUTHENTICATION & ACCESS CONTROL (Persistent Security Engine)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+let isCallerAuthenticated = false;
+
+async function checkAuthStatus() {
+  try {
+    const res = await fetch('/api/check_auth');
+    const data = await res.json();
+    isCallerAuthenticated = !!data.authenticated;
+    updateAuthUI();
+    if (isLocalhost()) {
+      refreshSessionsList();
+    }
+  } catch (e) {}
+}
+
+function updateAuthUI() {
+  const badge = document.getElementById('authStatusBadge');
+  const hostPill = document.getElementById('hostStatusPill');
+  const guestPill = document.getElementById('guestStatusPill');
+  const secBtn = document.getElementById('btnSecurityModal');
+
+  const isLocal = isLocalhost();
+
+  if (isLocal) {
+    if (hostPill) hostPill.style.display = 'inline-flex';
+    if (guestPill) guestPill.style.display = 'none';
+    if (secBtn) secBtn.style.display = 'inline-flex';
+    if (badge) badge.innerHTML = '';
+  } else {
+    if (hostPill) hostPill.style.display = 'none';
+    if (guestPill) guestPill.style.display = 'inline-flex';
+    if (secBtn) secBtn.style.display = 'none';
+
+    if (badge) {
+      if (isCallerAuthenticated) {
+        badge.innerHTML = `
+          <div class="remote-auth-pill">
+            <span class="pulse-dot"></span>
+            <span style="font-weight:600;">Remote Session</span>
+            <button class="btn-logout" onclick="logoutAuth()" title="Disconnect this session">Log Out</button>
+          </div>`;
+      } else {
+        badge.innerHTML = `
+          <button class="btn btn-ghost btn-sm" onclick="openAuthModal()" style="color: #60a5fa; border: 1px solid rgba(96,165,250,0.25); background: rgba(96,165,250,0.08);" title="Enter Master Passcode to manage host storage">
+            <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <span class="btn-label">Passcode</span>
+          </button>`;
+      }
+    }
+  }
+}
+
+function openAuthModal() {
+  openModal('authModal');
+  setTimeout(() => {
+    const inp = document.getElementById('authPasswordInput');
+    if (inp) inp.focus();
+  }, 100);
+}
+
+async function submitAuthLogin() {
+  const inp = document.getElementById('authPasswordInput');
+  const err = document.getElementById('authErrorMsg');
+  const btn = document.getElementById('authSubmitBtn');
+  const val = inp ? inp.value.trim() : '';
+  if (!val) return;
+
+  btn.disabled = true;
+  btn.innerText = 'Verifying...';
+  err.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: val })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      isCallerAuthenticated = true;
+      closeModal('authModal');
+      if (inp) inp.value = '';
+      updateAuthUI();
+      showToast('Authenticated successfully! Full access unlocked.', 'success');
+      loadDirectory(activeTab, activeTab === 'recv' ? curRecvPath : curSharePath, true);
+    } else {
+      err.innerText = data.error === 'rate_limited' ? ('Too many attempts. Locked out for ' + data.retry_after + 's.') : 'Invalid passcode or access key.';
+      err.style.display = 'block';
+    }
+  } catch (e) {
+    err.innerText = 'Network error during authentication.';
+    err.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Unlock Access';
+  }
+}
+
+async function logoutAuth() {
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+  } catch (e) {}
+  isCallerAuthenticated = false;
+  // Immediately reload so server renders the standalone Passcode Gate screen!
+  window.location.reload();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HOST SECURITY & REMOTE SESSIONS CENTER (Physical Host Only)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+async function loadHostSecurityInfo() {
+  const display = document.getElementById('hostPasscodeDisplay');
+  const tip = document.getElementById('hostPasscodeTip');
+  const badge = document.getElementById('passcodeTypeBadge');
+  if (!display) return;
+
+  try {
+    const res = await fetch('/api/host_security_info');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success) {
+        display.innerText = data.passcode || '[Stored hashed in .env]';
+        display.dataset.passcode = data.passcode || '';
+        if (tip && data.tip) {
+          tip.innerText = data.tip;
+        }
+        if (badge) {
+          badge.innerText = data.is_custom ? 'Personal Passcode' : 'Auto-Generated';
+          badge.style.background = data.is_custom ? 'rgba(74, 222, 128, 0.15)' : 'rgba(56, 189, 248, 0.15)';
+          badge.style.color = data.is_custom ? '#4ade80' : '#38bdf8';
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load host security info:', e);
+  }
+}
+
+function copyHostPasscode() {
+  const display = document.getElementById('hostPasscodeDisplay');
+  const btnText = document.getElementById('btnCopyPasscodeText');
+  const code = (display && (display.dataset.passcode || display.innerText)) || '';
+  if (!code || code.includes('Loading') || code.includes('Stored hashed')) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code).then(() => {
+      if (btnText) {
+        btnText.innerText = 'Copied!';
+        setTimeout(() => { btnText.innerText = 'Copy'; }, 2000);
+      }
+    });
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = code;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (btnText) {
+      btnText.innerText = 'Copied!';
+      setTimeout(() => { btnText.innerText = 'Copy'; }, 2000);
+    }
+  }
+}
+
+function openSecurityModal() {
+  openModal('securityModal');
+  loadHostSecurityInfo();
+  refreshSessionsList();
+}
+
+function closeSecurityModal() {
+  closeModal('securityModal');
+}
+
+async function refreshSessionsList() {
+  const tbody = document.getElementById('sessionsTableBody');
+  const countBadge = document.getElementById('headerSessionCount');
+  if (!tbody) return;
+
+  try {
+    const res = await fetch('/api/sessions');
+    if (res.status === 403) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;padding:16px;">Security management is available on the Host PC only.</td></tr>';
+      return;
+    }
+    const data = await res.json();
+    if (!data.success || !data.sessions) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary);padding:16px;">No session data available.</td></tr>';
+      return;
+    }
+
+    const sessions = data.sessions;
+    const activeSessions = sessions.filter(s => !s.revoked);
+    if (countBadge) {
+      countBadge.innerText = activeSessions.length;
+      countBadge.style.display = activeSessions.length > 0 ? 'inline-block' : 'none';
+    }
+
+    if (sessions.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-tertiary);padding:24px;">No remote sessions recorded yet. Your server is safe.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = sessions.map(s => {
+      const isRevoked = Boolean(s.revoked);
+      const statusHtml = isRevoked
+        ? '<span class="session-status-badge revoked"><span style="width:6px;height:6px;border-radius:50%;background:#ef4444;"></span> Revoked</span>'
+        : '<span class="session-status-badge active"><span style="width:6px;height:6px;border-radius:50%;background:#22c55e;"></span> Active</span>';
+
+      const actionHtml = isRevoked
+        ? '<span style="font-size:11px;color:var(--text-tertiary);">-</span>'
+        : `<button class="btn-danger-outline btn-sm" onclick="revokeSession('${s.id}')">Revoke</button>`;
+
+      const issuedStr = new Date(s.issued_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const lastActiveStr = new Date(s.last_active * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      return `<tr>
+        <td style="font-weight:500;color:var(--text-primary);">${escapeHtml(s.device || 'Web Client')}</td>
+        <td><div class="mono" style="font-size:11px;">${escapeHtml(s.ip || 'Unknown')}</div><div style="font-size:10px;color:var(--text-tertiary);">${escapeHtml(s.location || 'Unknown')}</div></td>
+        <td class="mono" style="font-size:11px;">${issuedStr}</td>
+        <td class="mono" style="font-size:11px;">${lastActiveStr}</td>
+        <td>${statusHtml}</td>
+        <td style="text-align:right;">${actionHtml}</td>
+      </tr>`;
+    }).join('');
+
+  } catch (err) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#f87171;padding:16px;">Failed to fetch active sessions.</td></tr>';
+  }
+}
+
+async function revokeSession(sessionId) {
+  try {
+    const res = await fetch('/api/revoke_session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'Remote session revoked.', 'success');
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to revoke session.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error revoking session.', 'error');
+  }
+}
+
+async function revokeAllSessions() {
+  try {
+    const res = await fetch('/api/revoke_session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'All remote sessions revoked.', 'success');
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to revoke sessions.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error revoking sessions.', 'error');
+  }
+}
+
+async function handleHostPasswordChange(e) {
+  e.preventDefault();
+  const input = document.getElementById('newMasterPasswordInput');
+  const chk = document.getElementById('chkRevokeOnPassChange');
+  const btn = document.getElementById('btnChangePasswordSubmit');
+  const newPwd = (input.value || '').trim();
+
+  if (newPwd.length < 6) {
+    showToast('Password must be at least 6 characters long.', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerText = 'Saving...';
+
+  try {
+    const res = await fetch('/api/change_password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        new_password: newPwd,
+        revoke_sessions: Boolean(chk.checked)
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || 'Passcode updated successfully.', 'success');
+      input.value = '';
+      loadHostSecurityInfo();
+      refreshSessionsList();
+    } else {
+      showToast(data.message || 'Failed to update passcode.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error updating passcode.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerText = 'Save Passcode';
+  }
+}
+
 /* Initial Boot */
 applyClientRole();
+checkAuthStatus();
 loadDirectory('recv', '', true);
 </script>
 
@@ -4712,7 +5573,333 @@ loadDirectory('recv', '', true);
 </html>"""
 
 
-def render_page(port):
+def render_login_page() -> str:
+    """Renders the standalone glassmorphism Passcode Gate screen for unauthenticated remote visitors."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TurboShare &mdash; Remote Authentication</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-root: #090a0c;
+      --bg-card: rgba(18, 20, 26, 0.85);
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(56, 189, 248, 0.5);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.25);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.12);
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100dvh;
+      background: radial-gradient(circle at 50% 20%, rgba(56, 189, 248, 0.08) 0%, transparent 60%),
+                  radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.05) 0%, transparent 50%),
+                  var(--bg-root);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      overflow-x: hidden;
+    }
+    .gate-container {
+      width: 100%;
+      max-width: 440px;
+      animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(12px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .gate-card {
+      background: var(--bg-card);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      padding: 2.5rem 2rem;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7),
+                  0 0 0 1px rgba(255, 255, 255, 0.04),
+                  inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      text-align: center;
+      position: relative;
+    }
+    .gate-card.shake {
+      animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+    }
+    @keyframes shake {
+      10%, 90% { transform: translate3d(-2px, 0, 0); }
+      20%, 80% { transform: translate3d(4px, 0, 0); }
+      30%, 50%, 70% { transform: translate3d(-6px, 0, 0); }
+      40%, 60% { transform: translate3d(6px, 0, 0); }
+    }
+    .shield-badge {
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 1.5rem;
+      background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(99, 102, 241, 0.15));
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      box-shadow: 0 0 24px var(--accent-glow);
+    }
+    .shield-badge svg {
+      width: 32px;
+      height: 32px;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 0.88rem;
+      line-height: 1.5;
+      margin-bottom: 2rem;
+    }
+    .form-group {
+      margin-bottom: 1.25rem;
+      text-align: left;
+    }
+    .label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .input-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    input[type="password"], input[type="text"] {
+      width: 100%;
+      background: rgba(9, 10, 12, 0.7);
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      padding: 0.85rem 3rem 0.85rem 1rem;
+      color: #fff;
+      font-size: 1rem;
+      font-family: inherit;
+      outline: none;
+      transition: all 0.2s ease;
+    }
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-glow);
+      background: rgba(9, 10, 12, 0.95);
+    }
+    .toggle-pwd {
+      position: absolute;
+      right: 0.75rem;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 0.35rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s;
+    }
+    .toggle-pwd:hover { color: var(--text-primary); }
+    .toggle-pwd svg { width: 20px; height: 20px; }
+    .btn-submit {
+      width: 100%;
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      padding: 0.9rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+    .btn-submit:hover:not(:disabled) {
+      background: linear-gradient(135deg, #0369a1, #1d4ed8);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.45);
+    }
+    .btn-submit:active:not(:disabled) {
+      transform: translateY(0);
+    }
+    .btn-submit:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .error-box {
+      background: var(--danger-bg);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.25rem;
+      color: #fca5a5;
+      font-size: 0.85rem;
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+      text-align: left;
+    }
+    .error-box svg { width: 18px; height: 18px; flex-shrink: 0; }
+    .footer-note {
+      margin-top: 2rem;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      opacity: 0.7;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+    }
+    .footer-note svg { width: 14px; height: 14px; }
+  </style>
+</head>
+<body>
+
+<div class="gate-container">
+  <div class="gate-card" id="gateCard">
+    <div class="shield-badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="m9 12 2 2 4-4"/>
+      </svg>
+    </div>
+    <h1>TurboShare Remote Access</h1>
+    <p class="subtitle">This server is protected with end-to-end access control. Enter the master passcode to connect.</p>
+
+    <div class="error-box" id="gateErrorBox">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y2="16" y2="16"/></svg>
+      <span id="gateErrorText">Invalid master passcode.</span>
+    </div>
+
+    <form id="gateForm" onsubmit="submitGatePasscode(event)">
+      <div class="form-group">
+        <label class="label" for="gatePasscode">Master Passcode</label>
+        <div class="input-wrapper">
+          <input type="password" id="gatePasscode" placeholder="Enter server passcode" required autocomplete="current-password" autofocus>
+          <button type="button" class="toggle-pwd" onclick="togglePasscodeVisibility()" aria-label="Toggle password view">
+            <svg id="eyeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <button type="submit" id="gateBtn" class="btn-submit">
+        <span>Unlock Access</span>
+        <svg style="width:18px;height:18px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </form>
+
+    <div class="footer-note">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <span>Encrypted Tunnel &middot; Rate Limited &middot; Host Audited</span>
+    </div>
+  </div>
+</div>
+
+<script>
+function togglePasscodeVisibility() {
+  const input = document.getElementById('gatePasscode');
+  const icon = document.getElementById('eyeIcon');
+  if (input.type === 'password') {
+    input.type = 'text';
+    icon.innerHTML = '<path d="m9.88 9.88 4.24 4.24m-6.72-2.12a9.66 9.66 0 0 1 4.6-2c5 0 8 4 8 4a15.82 15.82 0 0 1-2.9 3.5m-3.1 1.5a7.3 7.3 0 0 1-2.6.5c-5 0-8-4-8-4a15.88 15.88 0 0 1 4.12-3.88M2 2l20 20"/>';
+  } else {
+    input.type = 'password';
+    icon.innerHTML = '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>';
+  }
+}
+
+async function submitGatePasscode(e) {
+  e.preventDefault();
+  const input = document.getElementById('gatePasscode');
+  const btn = document.getElementById('gateBtn');
+  const errBox = document.getElementById('gateErrorBox');
+  const errText = document.getElementById('gateErrorText');
+  const card = document.getElementById('gateCard');
+
+  const pwd = input.value.trim();
+  if (!pwd) return;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span>Verifying...</span>';
+  errBox.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pwd })
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && data.success) {
+      btn.style.background = 'linear-gradient(135deg, #059669, #10b981)';
+      btn.innerHTML = '<span>&#10003; Verified! Loading...</span>';
+      setTimeout(() => {
+        window.location.reload();
+      }, 400);
+      return;
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '<span>Unlock Access</span><svg style="width:18px;height:18px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+    card.classList.remove('shake');
+    void card.offsetWidth;
+    card.classList.add('shake');
+
+    if (res.status === 429) {
+      const wait = data.retry_after || 60;
+      errText.innerText = 'Too many failed attempts. Locked out for ' + wait + ' seconds.';
+    } else {
+      errText.innerText = 'Incorrect master passcode. Access attempt logged.';
+    }
+    errBox.style.display = 'flex';
+    input.select();
+    input.focus();
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = '<span>Unlock Access</span>';
+    errText.innerText = 'Connection error reaching server.';
+    errBox.style.display = 'flex';
+  }
+}
+</script>
+
+</body>
+</html>"""
+
+
+def render_page(port, is_admin=False):
+    global GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
     ifaces = get_network_interfaces()
     with STATE_LOCK:
         recv_path = UPLOAD_DIR
@@ -4721,11 +5908,36 @@ def render_page(port):
     recv_di = disk_info(recv_path)
     share_di = disk_info(share_path) if share_path else {}
     
-    recv_path_esc = html.escape(recv_path)
-    share_path_esc = html.escape(share_path) if share_path else "No folder selected"
+    display_recv = recv_path if is_admin else sanitize_path_for_client(recv_path, is_admin=False)
+    display_share = share_path if is_admin else sanitize_path_for_client(share_path, is_admin=False)
+
+    recv_path_esc = html.escape(display_recv)
+    share_path_esc = html.escape(display_share) if share_path else "No folder selected"
 
     # Pre-render network cards
     net_items = []
+
+    # Prepend Global Tunnel Card if tunnel active
+    if GLOBAL_TUNNEL_URL:
+        magic_url = f"{GLOBAL_TUNNEL_URL}/api/auth?key={auth.get_access_key()}" if auth else GLOBAL_TUNNEL_URL
+        tunnel_badge = f"""
+        <div class="net-item net-card-tunnel" onclick="copyAddress('{GLOBAL_TUNNEL_URL}', this)" title="Click to copy public address" role="button" tabindex="0">
+          <div class="net-item-top">
+            <div class="net-kind-badge tunnel">
+              <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="2" x2="22" y1="12" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              <span class="net-kind-text">Global Access ({GLOBAL_TUNNEL_PROVIDER.title()})</span>
+            </div>
+            <button class="icon-btn-micro" onclick="event.stopPropagation(); showQRModal('{magic_url}', 'Global Remote Access (Magic Link)')" title="Scan Magic QR Code" aria-label="QR Code">
+              <svg viewBox="0 0 24 24"><rect width="6" height="6" x="3" y="3" rx="1.5"/><rect width="6" height="6" x="15" y="3" rx="1.5"/><rect width="6" height="6" x="3" y="15" rx="1.5"/><path d="M15 15h2v2h-2z"/><path d="M19 15h2v6h-6v-2h4v-4z"/><path d="M7 7h.01"/><path d="M17 7h.01"/><path d="M7 17h.01"/></svg>
+            </button>
+          </div>
+          <div class="net-item-url tabular-nums">{GLOBAL_TUNNEL_URL}</div>
+          <div class="net-item-desc">Secure Worldwide Access via Encrypted Tunnel</div>
+          <div class="net-copied-badge"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg> Copied!</div>
+        </div>
+        """
+        net_items.append(tunnel_badge)
+
     for i in ifaces:
         url = f"http://{i['ip']}:{port}"
         badge_kind = i['kind']
@@ -4799,14 +6011,74 @@ def render_page(port):
 # ═══════════════════════════════════════════════════════════════════════════════
 class TurboShareHandler(BaseHTTPRequestHandler):
 
+    def send_security_headers(self):
+        """Inject strict defense-in-depth HTTP security headers."""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+
     def send_json(self, data, status=200):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_security_headers()
         self.end_headers()
         self.wfile.write(payload)
+
+    def is_authenticated(self) -> bool:
+        """Verify caller session against auth module."""
+        global REQUIRE_AUTH, REQUIRE_AUTH_ON_LAN
+        if not REQUIRE_AUTH:
+            return True
+        if self.is_physical_localhost() and not REQUIRE_AUTH_ON_LAN:
+            return True
+        if auth:
+            return auth.is_authenticated(self)
+        return True
+
+    def check_csrf(self) -> bool:
+        """Validate Sec-Fetch-Site to neutralize CSRF attacks."""
+        sec_fetch = self.headers.get("Sec-Fetch-Site", "")
+        if sec_fetch == "cross-site":
+            return False
+        return True
+
+    def is_physical_localhost(self) -> bool:
+        """Verify whether request originated physically from localhost (not via tunnel)."""
+        if auth and hasattr(auth, "is_physical_localhost"):
+            return auth.is_physical_localhost(self)
+
+        # Fallback if auth module is unavailable (matching fail-closed logic)
+        if not hasattr(self, "client_address") or not self.client_address:
+            return False
+        try:
+            peer = str(self.client_address[0]).strip()
+        except (IndexError, TypeError, Exception):
+            return False
+
+        is_loopback = (
+            peer in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+            or peer.startswith("127.")
+            or peer.startswith("::ffff:127.")
+        )
+        if not is_loopback:
+            return False
+
+        headers = getattr(self, "headers", None)
+        if headers:
+            tunnel_headers = frozenset({"cf-connecting-ip", "x-forwarded-for", "x-real-ip", "forwarded", "true-client-ip"})
+            if hasattr(headers, "items"):
+                for k, v in headers.items():
+                    if str(k).strip().lower() in tunnel_headers and bool(str(v).strip()):
+                        return False
+            for h in ("CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP", "Forwarded", "True-Client-IP"):
+                val = getattr(headers, "get", lambda x, d=None: None)(h)
+                if val and bool(str(val).strip()):
+                    return False
+
+        return True
 
     def do_GET(self):
         global UPLOAD_DIR, HOST_SHARE
@@ -4814,12 +6086,44 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
-        # ── Main Web Dashboard ──
+        # ── Intercept Authentication & Session Management Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth", "/api/sessions", "/api/revoke_session", "/api/change_password", "/api/host_security_info"):
+            if auth.handle_auth_routes(self, path, qs):
+                return
+
+        # ── Tunnel Status API ──
+        if path == "/api/tunnel":
+            self.send_json({
+                "enabled": bool(GLOBAL_TUNNEL_URL),
+                "url": GLOBAL_TUNNEL_URL,
+                "provider": GLOBAL_TUNNEL_PROVIDER
+            })
+            return
+
+        # ── Main Web Dashboard / Zero-Trust Passcode Gate ──
         if path in ("/", "/index.html"):
-            content = render_page(SERVER_PORT).encode("utf-8")
+            is_host = self.is_physical_localhost()
+            is_auth = self.is_authenticated()
+
+            # Strict Zero-Trust Gating:
+            # If request is from remote tunnel or external client and NOT authenticated,
+            # DO NOT RENDER THE DASHBOARD! Serve the standalone Passcode Gate screen.
+            if not is_host and not is_auth:
+                content = render_login_page().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_security_headers()
+                self.end_headers()
+                self.wfile.write(content)
+                return
+
+            # Otherwise, serve the full dashboard
+            content = render_page(SERVER_PORT, is_admin=is_host).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(content)))
+            self.send_security_headers()
             self.end_headers()
             self.wfile.write(content)
             return
@@ -4862,6 +6166,13 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── In-Browser Host Filesystem Browser ──
         if path == "/api/browse_host":
+            if not self.is_authenticated():
+                self.send_json({
+                    "error": "unauthorized",
+                    "login_required": True,
+                    "message": "Authentication required to browse host drives."
+                }, status=401)
+                return
             req_path = qs.get("path", [""])[0]
             data = browse_host_directory(req_path)
             self.send_json(data)
@@ -4869,16 +6180,35 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Directory Listing for Dual Tabs ──
         if path == "/api/list":
+            if not self.is_authenticated():
+                self.send_json({
+                    "error": "unauthorized",
+                    "login_required": True,
+                    "items": [],
+                    "message": "Authentication required to view files."
+                }, status=401)
+                return
             tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if tab == "share" else UPLOAD_DIR
+            is_admin = self.is_authenticated()
             if not base or not os.path.exists(base):
-                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                self.send_json({
+                    "items": [],
+                    "path": rel,
+                    "disk": disk_info(base) if base else {},
+                    "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
+                })
                 return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
-                self.send_json({"items": [], "path": rel, "disk": disk_info(base)})
+                self.send_json({
+                    "items": [],
+                    "path": rel,
+                    "disk": disk_info(base),
+                    "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
+                })
                 return
 
             items = []
@@ -4905,12 +6235,15 @@ class TurboShareHandler(BaseHTTPRequestHandler):
                 "items": items,
                 "path": rel,
                 "disk": disk_info(target),
-                "base": base
+                "base": base if is_admin else sanitize_path_for_client(base, is_admin=False)
             })
             return
 
         # ── Smart Resume Byte Check ──
         if path == "/api/check":
+            if not self.is_authenticated():
+                self.send_json({"exists": False, "size": 0, "login_required": True}, status=401)
+                return
             rel = qs.get("path", [""])[0] or qs.get("filename", [""])[0]
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
@@ -4924,6 +6257,8 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Download Single File ──
         if path == "/download":
+            if not self.is_authenticated():
+                self.send_response(401); self.send_security_headers(); self.end_headers(); return
             tab = qs.get("tab", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
@@ -4943,6 +6278,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             safe_ascii_fname = raw_fname.encode("ascii", "ignore").decode("ascii").strip() or "download"
             fname_utf8 = urllib.parse.quote(raw_fname)
             self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_fname}"; filename*=UTF-8\'\'{fname_utf8}')
+            self.send_security_headers()
             self.end_headers()
             try:
                 with open(fp, "rb") as f:
@@ -4954,48 +6290,89 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Stream Folder as ZIP Archive ──
         if path == "/api/zip":
+            if not self.is_authenticated():
+                self.send_response(401); self.send_security_headers(); self.end_headers(); return
             tab = qs.get("tab", ["recv"])[0] or qs.get("target", ["recv"])[0]
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if tab == "share" else UPLOAD_DIR
             if not base:
-                self.send_response(404); self.end_headers(); return
+                self.send_response(404); self.send_security_headers(); self.end_headers(); return
             target = safe_path(base, rel) if rel else os.path.abspath(base)
             if not target or not os.path.isdir(target):
-                self.send_response(404); self.end_headers(); return
+                self.send_response(404); self.send_security_headers(); self.end_headers(); return
 
             zip_name = (os.path.basename(target) or "turboshare_export") + ".zip"
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(target):
-                    for d in dirs:
-                        dir_full = os.path.join(root, d)
-                        arc_d = os.path.relpath(dir_full, target).replace("\\", "/") + "/"
-                        zf.writestr(arc_d, "")
-                    for f in files:
-                        full_f = os.path.join(root, f)
-                        arc_f = os.path.relpath(full_f, target).replace("\\", "/")
-                        try:
-                            zf.write(full_f, arc_f)
-                        except (PermissionError, OSError):
-                            pass
 
-            raw_zip = buf.getvalue()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Length", str(len(raw_zip)))
-            safe_ascii_zip = zip_name.encode("ascii", "ignore").decode("ascii").strip() or "archive.zip"
-            fname_esc = urllib.parse.quote(zip_name)
-            self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_zip}"; filename*=UTF-8\'\'{fname_esc}')
-            self.end_headers()
+            # Create a temporary file on disk rather than holding gigabytes in RAM (prevents OOM)
+            temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+            temp_zip_path = temp_zip.name
+            temp_zip.close()
+
             try:
-                self.wfile.write(raw_zip)
+                file_count = 0
+                total_bytes = 0
+                with zipfile.ZipFile(temp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for root, dirs, files in os.walk(target):
+                        # Enforce recursion depth limit
+                        rel_root = os.path.relpath(root, target)
+                        depth = len(rel_root.replace("\\", "/").split("/")) if rel_root != "." else 0
+                        if depth > MAX_ZIP_DEPTH:
+                            dirs.clear()
+                            continue
+
+                        for d in dirs:
+                            dir_full = os.path.join(root, d)
+                            arc_d = os.path.relpath(dir_full, target).replace("\\", "/") + "/"
+                            zf.writestr(arc_d, "")
+
+                        for f in files:
+                            if file_count >= MAX_ZIP_FILES:
+                                break
+                            full_f = os.path.join(root, f)
+                            arc_f = os.path.relpath(full_f, target).replace("\\", "/")
+                            try:
+                                sz = os.path.getsize(full_f)
+                                if total_bytes + sz > MAX_ZIP_SIZE:
+                                    break
+                                zf.write(full_f, arc_f)
+                                file_count += 1
+                                total_bytes += sz
+                            except (PermissionError, OSError):
+                                pass
+
+                zip_size = os.path.getsize(temp_zip_path)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(zip_size))
+                safe_ascii_zip = zip_name.encode("ascii", "ignore").decode("ascii").strip() or "archive.zip"
+                fname_esc = urllib.parse.quote(zip_name)
+                self.send_header("Content-Disposition", f'attachment; filename="{safe_ascii_zip}"; filename*=UTF-8\'\'{fname_esc}')
+                self.send_security_headers()
+                self.end_headers()
+
+                # Stream from disk file in 64KB chunks (constant O(1) memory)
+                with open(temp_zip_path, "rb") as f:
+                    while chunk := f.read(64 * 1024):
+                        self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            finally:
+                try:
+                    if os.path.exists(temp_zip_path):
+                        os.remove(temp_zip_path)
+                except Exception:
+                    pass
             return
 
         # ── Trigger Native OS Folder Picker ──
         if path == "/api/pick_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to pick folders."}, status=401)
+                return
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
+                return
             target_type = qs.get("target", ["share"])[0] or qs.get("type", ["share"])[0]
             chosen, err = pick_folder_powershell()
             if chosen:
@@ -5011,6 +6388,12 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open Folder in Host OS Explorer ──
         if path == "/api/open_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
+                return
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                return
             target_type = qs.get("type", ["recv"])[0] or qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 target_dir = HOST_SHARE if target_type == "share" else UPLOAD_DIR
@@ -5048,22 +6431,67 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
+        # ── Intercept Authentication & Session Management Routes ──
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/sessions", "/api/revoke_session", "/api/change_password"):
+            content_len = safe_int(self.headers.get("Content-Length", 0))
+            body_bytes = self.rfile.read(content_len) if content_len > 0 else b""
+            body_data = {}
+            if body_bytes:
+                try:
+                    body_data = json.loads(body_bytes.decode("utf-8"))
+                except Exception:
+                    pass
+            if auth.handle_auth_routes(self, path, qs, body_data=body_data):
+                return
+
+        # ── CSRF Protection ──
+        if not self.check_csrf():
+            self.send_json({"error": "forbidden", "message": "Cross-site request blocked."}, status=403)
+            return
+
         # ── Resumable Chunked Upload Protocol ──
         if path == "/api/upload":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to upload files."}, status=401)
+                return
             rel = qs.get("path", ["upload"])[0]
-            offset = int(qs.get("offset", [0])[0])
+            offset = safe_int(qs.get("offset", [0]))
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
             full = safe_path(base, rel)
             if not full:
-                self.send_response(403); self.end_headers(); return
+                self.send_response(403); self.send_security_headers(); self.end_headers(); return
 
             try:
-                os.makedirs(os.path.dirname(full), exist_ok=True)
-                content_len = int(self.headers.get("Content-Length", 0))
+                content_len = safe_int(self.headers.get("Content-Length", 0))
+                if content_len > MAX_UPLOAD_SIZE:
+                    self.send_json({"success": False, "status": "error", "error": f"File size exceeds maximum allowed limit ({MAX_UPLOAD_SIZE // (1024**3)} GB)."}, status=413)
+                    return
+
+                # Pre-flight check free disk space (content_len + MIN_FREE_DISK_BUFFER)
+                target_dir = os.path.dirname(full)
+                os.makedirs(target_dir, exist_ok=True)
+                try:
+                    free_disk = shutil.disk_usage(target_dir).free
+                    if free_disk < content_len + MIN_FREE_DISK_BUFFER:
+                        self.send_json({"success": False, "status": "error", "error": "Insufficient host storage space (500 MB buffer required)."}, status=507)
+                        return
+                except Exception:
+                    pass
+
+                # Offset bounds validation
+                if offset > 0 and os.path.exists(full):
+                    current_size = os.path.getsize(full)
+                    if offset > current_size:
+                        self.send_json({"success": False, "status": "error", "error": "Invalid resume offset beyond existing file length."}, status=400)
+                        return
+                elif offset > 0 and not os.path.exists(full):
+                    self.send_json({"success": False, "status": "error", "error": "Cannot resume non-existent file."}, status=400)
+                    return
+
                 bytes_written = 0
-                chunk_size = 1024 * 1024  # 1 MB optimal streaming chunk
+                chunk_size = 64 * 1024  # 64 KB streaming chunk
 
                 if offset == 0:
                     with open(full, "wb") as f:
@@ -5076,26 +6504,27 @@ class TurboShareHandler(BaseHTTPRequestHandler):
                             bytes_written += len(chunk)
                 else:
                     # Resuming partial upload with atomic seek and truncate
-                    if os.path.exists(full):
-                        with open(full, "r+b") as f:
-                            f.seek(offset)
-                            f.truncate(offset)
-                            while bytes_written < content_len:
-                                to_read = min(chunk_size, content_len - bytes_written)
-                                chunk = self.rfile.read(to_read)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                bytes_written += len(chunk)
-                    else:
-                        with open(full, "wb") as f:
-                            while bytes_written < content_len:
-                                to_read = min(chunk_size, content_len - bytes_written)
-                                chunk = self.rfile.read(to_read)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                                bytes_written += len(chunk)
+                    with open(full, "r+b") as f:
+                        f.seek(offset)
+                        f.truncate(offset)
+                        while bytes_written < content_len:
+                            to_read = min(chunk_size, content_len - bytes_written)
+                            chunk = self.rfile.read(to_read)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            bytes_written += len(chunk)
+
+                # Verify full payload received without premature connection drop
+                if content_len > 0 and bytes_written < content_len:
+                    self.send_json({
+                        "success": False,
+                        "status": "error",
+                        "error": "Upload truncated or connection closed prematurely.",
+                        "received": bytes_written,
+                        "expected": content_len
+                    }, status=400)
+                    return
 
                 self.send_json({
                     "success": True,
@@ -5111,12 +6540,19 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Set Folder Path ──
         if path in ("/api/set_path", "/api/set_folder"):
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len)
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to change host storage paths."}, status=401)
+                return
+            content_len = safe_int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
-                data = json.loads(body.decode("utf-8"))
+                data = json.loads(body.decode("utf-8")) if body else {}
                 target_type = data.get("target") or data.get("type") or "recv"
-                target_path = os.path.abspath(data.get("path", "").strip().strip("'\""))
+                raw_path = data.get("path", "").strip().strip("'\"")
+                if not raw_path:
+                    self.send_json({"success": False, "status": "error", "error": "Path cannot be empty."}, status=400)
+                    return
+                target_path = os.path.abspath(raw_path)
 
                 if not os.path.exists(target_path):
                     os.makedirs(target_path, exist_ok=True)
@@ -5142,14 +6578,21 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Create New Directory on Host ──
         if path == "/api/create_folder":
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len)
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to create folders."}, status=401)
+                return
+            content_len = safe_int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
-                data = json.loads(body.decode("utf-8"))
+                data = json.loads(body.decode("utf-8")) if body else {}
                 parent = data.get("parent", "").strip()
                 name = data.get("name", "").strip()
+                raw_path = data.get("path", "").strip()
                 if not parent or not name:
-                    full_p = os.path.abspath(data.get("path", "").strip())
+                    if not raw_path:
+                        self.send_json({"success": False, "status": "error", "error": "Folder path cannot be empty."}, status=400)
+                        return
+                    full_p = os.path.abspath(raw_path)
                 else:
                     full_p = os.path.abspath(os.path.join(parent, name))
 
@@ -5161,6 +6604,12 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Trigger Native Picker (POST) ──
         if path == "/api/pick_folder":
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to pick folders."}, status=401)
+                return
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
+                return
             chosen, err = pick_folder_powershell()
             if chosen:
                 self.send_json({"success": True, "status": "ok", "path": chosen})
@@ -5170,7 +6619,13 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
         # ── Open in OS (POST) ──
         if path == "/api/open_folder":
-            content_len = int(self.headers.get("Content-Length", 0))
+            if not self.is_authenticated():
+                self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
+                return
+            if not self.is_physical_localhost():
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                return
+            content_len = safe_int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
             try:
                 data = json.loads(body.decode("utf-8")) if body else {}
@@ -5192,23 +6647,71 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         pass
 
 
+def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServer:
+    """Instantiate and configure the multi-threaded HTTP server."""
+    if isinstance(host, int) and isinstance(port, str):
+        host, port = port, host
+    elif isinstance(host, int):
+        port = host
+        host = "0.0.0.0"
+    ThreadingHTTPServer.allow_reuse_address = True
+    server = ThreadingHTTPServer((host, port), TurboShareHandler)
+    server.daemon_threads = True
+    return server
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  APPLICATION BOOTSTRAP & SERVER LAUNCHER
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
-    global UPLOAD_DIR, SERVER_PORT
+    global UPLOAD_DIR, SERVER_PORT, GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
 
     default_dir = r"D:\TurboShare" if os.path.exists("D:\\") else os.path.join(
         os.path.expanduser("~"), "Downloads", "TurboShare"
     )
 
-    if len(sys.argv) > 1:
-        chosen = sys.argv[1].strip().strip("'\"")
-    else:
-        chosen = default_dir
+    chosen = default_dir
+    tunnel_prov = os.environ.get("TUNNEL_PROVIDER", "auto").strip().lower()
+
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i].strip()
+        if arg in ("--tunnel", "-t") and i + 1 < len(sys.argv):
+            tunnel_prov = sys.argv[i + 1].strip().lower()
+            i += 2
+        elif arg.startswith("--tunnel="):
+            tunnel_prov = arg.split("=", 1)[1].strip().lower()
+            i += 1
+        elif arg in ("--port", "-p") and i + 1 < len(sys.argv):
+            try:
+                SERVER_PORT = int(sys.argv[i + 1].strip())
+            except ValueError:
+                pass
+            i += 2
+        elif arg.startswith("--port="):
+            try:
+                SERVER_PORT = int(arg.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+            i += 1
+        elif not arg.startswith("-"):
+            chosen = arg.strip("'\"")
+            i += 1
+        else:
+            i += 1
 
     UPLOAD_DIR = os.path.abspath(chosen)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    # Initialize Auth Configuration
+    if auth:
+        auth.init_config()
+
+    # Launch Global Tunnel if configured
+    if tunnel_prov != "none":
+        print(f"[*] Initializing Global Remote Access tunnel (provider={tunnel_prov})...")
+        t = threading.Thread(target=lambda: TunnelManager.start(SERVER_PORT, provider=tunnel_prov), daemon=True)
+        t.start()
 
     ifaces = get_network_interfaces()
     primary = next((f"http://{i['ip']}:{SERVER_PORT}" for i in ifaces
@@ -5220,6 +6723,14 @@ def main():
     print(f"  Inbox Folder (Save Target) : {UPLOAD_DIR}")
     for i in ifaces:
         print(f"  {i['label']:<24} -> http://{i['ip']}:{SERVER_PORT}")
+    if auth:
+        print("  " + "-" * 64)
+        print("  [SECURITY CREDENTIALS]")
+        print(f"  Master App Passcode        : {auth.get_master_password()}")
+        print(f"  Persistent Bookmark Key    : {auth.get_access_key()}")
+        print(f"  Direct Localhost Access    : http://127.0.0.1:{SERVER_PORT}")
+        print(f"  Security Recommendation    : Tip: We recommend setting your own personal passcode,")
+        print(f"                               though your auto-generated code is active and secure.")
     print("=" * 68)
 
     if qrcode and primary:
@@ -5230,9 +6741,7 @@ def main():
         except Exception:
             pass
 
-    ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer(("0.0.0.0", SERVER_PORT), TurboShareHandler)
-    server.daemon_threads = True
+    server = create_server("0.0.0.0", SERVER_PORT)
 
     try:
         server.serve_forever()
