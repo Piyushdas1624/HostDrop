@@ -40,8 +40,8 @@ Desktop.ini
 .DS_Store
 
 # Transfer directories — don't commit received files
-TurboShare/
-TurboShare_Received/
+HostDrop/
+HostDrop_Received/
 EthernetTransfers/
 
 # Agent metadata and audit artifacts

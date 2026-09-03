@@ -671,7 +671,7 @@ def pick_folder_powershell(timeout_sec=120):
     ps_script = (
         "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;"
         "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;"
-        "$dialog.Description = 'Select folder for TurboShare File Transfer Hub';"
+        "$dialog.Description = 'Select folder for HostDrop File Transfer Hub';"
         "$dialog.ShowNewFolderButton = $true;"
         "$topForm = New-Object System.Windows.Forms.Form;"
         "$topForm.TopMost = $true;"
@@ -700,7 +700,7 @@ def pick_folder_powershell(timeout_sec=120):
             root = tk.Tk()
             root.withdraw()
             root.wm_attributes("-topmost", 1)
-            path = filedialog.askdirectory(title="Select folder for TurboShare")
+            path = filedialog.askdirectory(title="Select folder for HostDrop")
             root.destroy()
             if path and os.path.isdir(path):
                 return path, None
@@ -763,7 +763,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover">
-<title>TurboShare &mdash; High-Speed LAN Transfer Hub</title>
+<title>HostDrop &mdash; High-Speed LAN Transfer Hub</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -3065,7 +3065,7 @@ body {
         <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
       </div>
       <div class="brand-title">
-        TurboShare
+        HostDrop
         <span class="status-pill host-badge" id="hostStatusPill" title="Host PC Only: 127.0.0.1:__PORT__ (Cannot be accessed by other devices)">
           <span class="status-dot"></span>
           Host Computer &bull; 127.0.0.1:__PORT__ (Host Only)
@@ -3413,7 +3413,7 @@ body {
     <div class="modal-header">
       <div class="modal-title">
         <svg class="icon" style="color: #60a5fa;" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <span id="authModalTitle">TurboShare Security Passcode</span>
+        <span id="authModalTitle">HostDrop Security Passcode</span>
       </div>
       <button class="icon-btn-micro" onclick="closeModal('authModal')" aria-label="Close dialog">
         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -3458,7 +3458,7 @@ body {
               <span>Active Master Passcode</span>
               <span id="passcodeTypeBadge" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(56,189,248,0.15); color: #38bdf8; font-weight: 500;">PBKDF2-HMAC-SHA256</span>
             </div>
-            <div style="font-size: 11px; color: var(--text-secondary);">Used by remote devices to unlock TurboShare</div>
+            <div style="font-size: 11px; color: var(--text-secondary);">Used by remote devices to unlock HostDrop</div>
           </div>
           <div style="display: flex; align-items: center; gap: 8px;">
             <code id="hostPasscodeDisplay" style="font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: #38bdf8; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); padding: 4px 10px; border-radius: 6px; letter-spacing: 0.5px;">Loading...</code>
@@ -3658,7 +3658,7 @@ body {
           </div>
           <div style="text-align: center; width: 100%;">
             <div class="mono" id="qrModalUrl" style="font-size: 13px; font-weight: 600; color: var(--text-primary); word-break: break-all; margin-bottom: 4px;"></div>
-            <div style="font-size: 11px; color: var(--text-tertiary);">Scan with your phone or tablet camera to open TurboShare on your local network.</div>
+            <div style="font-size: 11px; color: var(--text-tertiary);">Scan with your phone or tablet camera to open HostDrop on your local network.</div>
           </div>
           <button class="btn btn-primary btn-sm" style="width: 100%; justify-content: center;" onclick="copyAddress(document.getElementById('qrModalUrl').textContent, this)">
             <svg class="icon" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
@@ -3699,7 +3699,7 @@ body {
     <div class="modal-header">
       <div class="modal-title">
         <svg class="icon" style="color: var(--brand-blue);" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        TurboShare Connection Guide &amp; Beginner FAQ
+        HostDrop Connection Guide &amp; Beginner FAQ
       </div>
       <button class="icon-btn-micro" onclick="closeModal('guideModal')">
         <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -3742,7 +3742,7 @@ body {
               <li>Your phone might be <code>192.168.1.12</code></li>
               <li>Your tablet might be <code>192.168.1.18</code></li>
             </ul>
-            <p><strong>The IP address shown in TurboShare belongs to your PC (the host computer).</strong> When you want to connect your phone, tablet, or another laptop, you type your <strong>PC's IP address</strong> into the phone's web browser (or simply scan the QR code). You do <em>not</em> type your phone's IP address&mdash;you are telling your phone to visit your PC so they can exchange files!</p>
+            <p><strong>The IP address shown in HostDrop belongs to your PC (the host computer).</strong> When you want to connect your phone, tablet, or another laptop, you type your <strong>PC's IP address</strong> into the phone's web browser (or simply scan the QR code). You do <em>not</em> type your phone's IP address&mdash;you are telling your phone to visit your PC so they can exchange files!</p>
           </div>
         </div>
 
@@ -3756,7 +3756,7 @@ body {
             <svg class="icon chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
           <div class="faq-answer">
-            <p>TurboShare automatically detects all active connections. Here is when to use each one:</p>
+            <p>HostDrop automatically detects all active connections. Here is when to use each one:</p>
             <div class="faq-mode-grid">
               <div class="faq-mode-card">
                 <div class="mode-title" style="color: #fbbf24;">Mobile Hotspot (192.168.137.1)</div>
@@ -3803,7 +3803,7 @@ body {
             <svg class="icon chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
           <div class="faq-answer">
-            <p>All files and folders transferred from phones or other computers are saved directly into your <strong>Inbox Folder on PC</strong> (default: <code>D:\TurboShare</code> or <code>C:\TurboShare</code>).</p>
+            <p>All files and folders transferred from phones or other computers are saved directly into your <strong>Inbox Folder on PC</strong> (default: <code>D:\HostDrop</code> or <code>C:\HostDrop</code>).</p>
             <p>You can see the current folder path in the <strong>"Inbox Folder on PC"</strong> card in the left sidebar. To reveal your files instantly, click the <strong>"Open in Windows Explorer"</strong> button on your PC.</p>
           </div>
         </div>
@@ -3818,7 +3818,7 @@ body {
             <svg class="icon chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
           <div class="faq-answer">
-            <p><strong>Yes, absolutely!</strong> TurboShare preserves full folder structures recursively:</p>
+            <p><strong>Yes, absolutely!</strong> HostDrop preserves full folder structures recursively:</p>
             <ul>
               <li><strong>From PC:</strong> Click <strong>"Send Folder"</strong> or simply drag-and-drop any directory directly onto the web page.</li>
               <li><strong>From Mobile / Chrome:</strong> Choose "Send Folder" to select albums or multi-file folders.</li>
@@ -3837,8 +3837,8 @@ body {
             <svg class="icon chevron" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
           <div class="faq-answer">
-            <p><strong>Zero corruption, zero wasted time.</strong> TurboShare features smart byte-level chunk resumption.</p>
-            <p>If your Wi-Fi flickers, your phone goes to sleep, or the browser closes: simply re-select or drop the same file again. TurboShare will check the PC's storage, recognize the exact bytes already received, and <strong>resume from the exact byte where it stopped</strong> without re-uploading from the start.</p>
+            <p><strong>Zero corruption, zero wasted time.</strong> HostDrop features smart byte-level chunk resumption.</p>
+            <p>If your Wi-Fi flickers, your phone goes to sleep, or the browser closes: simply re-select or drop the same file again. HostDrop will check the PC's storage, recognize the exact bytes already received, and <strong>resume from the exact byte where it stopped</strong> without re-uploading from the start.</p>
           </div>
         </div>
 
@@ -3868,7 +3868,7 @@ body {
           </div>
           <div class="faq-answer">
             <p><strong>100% Private Local Area Network (LAN) Transfer &mdash; Zero Cloud.</strong></p>
-            <p>Your files move strictly across your local Wi-Fi, Hotspot, or Ethernet cable directly from one device to the other. Your data never touches the internet, third-party cloud servers, or external tracking. You can even unplug your internet cable or turn off mobile data, and TurboShare will continue transferring at maximum local speed!</p>
+            <p>Your files move strictly across your local Wi-Fi, Hotspot, or Ethernet cable directly from one device to the other. Your data never touches the internet, third-party cloud servers, or external tracking. You can even unplug your internet cable or turn off mobile data, and HostDrop will continue transferring at maximum local speed!</p>
           </div>
         </div>
 
@@ -3885,7 +3885,7 @@ body {
             <p>If your phone or guest device cannot open the page, check these 4 common items:</p>
             <ol>
               <li><strong>Same Network:</strong> Ensure both your PC and phone are on the exact same Wi-Fi network (or connected to your PC's Mobile Hotspot).</li>
-              <li><strong>Windows Firewall:</strong> When TurboShare started, Windows may have asked for network permission. Make sure <em>"Private Networks"</em> is allowed. In Windows Defender Firewall &rarr; <em>Allow an app through firewall</em> &rarr; ensure Python / TurboShare is checked for Private networks.</li>
+              <li><strong>Windows Firewall:</strong> When HostDrop started, Windows may have asked for network permission. Make sure <em>"Private Networks"</em> is allowed. In Windows Defender Firewall &rarr; <em>Allow an app through firewall</em> &rarr; ensure Python / HostDrop is checked for Private networks.</li>
               <li><strong>Public Wi-Fi "AP Isolation":</strong> Some hotel, coffee shop, or school Wi-Fi networks block devices from talking to each other. <em>Fix:</em> Turn on Windows Mobile Hotspot on your PC and connect your phone directly to the PC's hotspot instead!</li>
               <li><strong>Exact Port in URL:</strong> Verify you typed the port number <code>:8080</code> at the end of the address (e.g. <code>http://192.168.1.45:8080</code>).</li>
             </ol>
@@ -3919,7 +3919,7 @@ let activeModalBrowsePath = '';
 let activeFaqCategory = 'all';
 
 /* Network Interfaces injected from backend */
-window.turboNetInterfaces = __NET_INTERFACES_JSON__;
+window.hostNetInterfaces = __NET_INTERFACES_JSON__;
 
 /* Host vs Guest Role Adaptive State */
 const isHostClient = ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname);
@@ -4251,7 +4251,7 @@ async function saveAsFolderStructure(folderName) {
 
 async function saveCurrentFolderStructure() {
   const curPath = activeTab === 'recv' ? curRecvPath : curSharePath;
-  const folderName = curPath ? curPath.split('/').pop() : (activeTab === 'recv' ? 'TurboShare_Inbox' : 'TurboShare_Library');
+  const folderName = curPath ? curPath.split('/').pop() : (activeTab === 'recv' ? 'HostDrop_Inbox' : 'HostDrop_Library');
   
   if (!isFileSystemAccessSupported()) {
     showToast('Direct folder writing not supported on this browser. Downloading as ZIP instead...', 'info');
@@ -5107,7 +5107,7 @@ function copyAddress(text, cardEl) {
 let currentSelectedQrUrl = '';
 
 function showGeneralQR() {
-  const ifaces = window.turboNetInterfaces || [];
+  const ifaces = window.hostNetInterfaces || [];
   // Prioritize wifi > hotspot > ethernet > first non-virtual > first available
   let best = ifaces.find(i => i.kind === 'wifi') 
           || ifaces.find(i => i.kind === 'hotspot')
@@ -5138,7 +5138,7 @@ function selectQRInterface(url, label) {
 }
 
 function showQRModal(url, label) {
-  const ifaces = window.turboNetInterfaces || [];
+  const ifaces = window.hostNetInterfaces || [];
   
   // If url is localhost or 127.0.0.1, NEVER generate a QR for localhost!
   // Instead, select the best real network interface for the phone to scan!
@@ -5580,7 +5580,7 @@ def render_login_page() -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TurboShare &mdash; Remote Authentication</title>
+  <title>HostDrop &mdash; Remote Authentication</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -5789,7 +5789,7 @@ def render_login_page() -> str:
         <path d="m9 12 2 2 4-4"/>
       </svg>
     </div>
-    <h1>TurboShare Remote Access</h1>
+    <h1>HostDrop Remote Access</h1>
     <p class="subtitle">This server is protected with end-to-end access control. Enter the master passcode to connect.</p>
 
     <div class="error-box" id="gateErrorBox">
@@ -6009,7 +6009,7 @@ def render_page(port, is_admin=False):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  HTTP REQUEST ROUTER (Zero-Dependency Python Backend)
 # ═══════════════════════════════════════════════════════════════════════════════
-class TurboShareHandler(BaseHTTPRequestHandler):
+class HostDropHandler(BaseHTTPRequestHandler):
 
     def send_security_headers(self):
         """Inject strict defense-in-depth HTTP security headers."""
@@ -6302,7 +6302,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
             if not target or not os.path.isdir(target):
                 self.send_response(404); self.send_security_headers(); self.end_headers(); return
 
-            zip_name = (os.path.basename(target) or "turboshare_export") + ".zip"
+            zip_name = (os.path.basename(target) or "hostdrop_export") + ".zip"
 
             # Create a temporary file on disk rather than holding gigabytes in RAM (prevents OOM)
             temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
@@ -6655,7 +6655,7 @@ def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServe
         port = host
         host = "0.0.0.0"
     ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer((host, port), TurboShareHandler)
+    server = ThreadingHTTPServer((host, port), HostDropHandler)
     server.daemon_threads = True
     return server
 
@@ -6666,8 +6666,8 @@ def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServe
 def main():
     global UPLOAD_DIR, SERVER_PORT, GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
 
-    default_dir = r"D:\TurboShare" if os.path.exists("D:\\") else os.path.join(
-        os.path.expanduser("~"), "Downloads", "TurboShare"
+    default_dir = r"D:\HostDrop" if os.path.exists("D:\\") else os.path.join(
+        os.path.expanduser("~"), "Downloads", "HostDrop"
     )
 
     chosen = default_dir
@@ -6718,7 +6718,7 @@ def main():
                     if i["kind"] in ("wifi", "ethernet", "ethernet-direct", "hotspot")), None)
 
     print("=" * 68)
-    print("  TurboShare -- High-Speed Cross-Device Transfer Hub")
+    print("  HostDrop -- High-Speed Cross-Device Transfer Hub")
     print("=" * 68)
     print(f"  Inbox Folder (Save Target) : {UPLOAD_DIR}")
     for i in ifaces:
@@ -6746,7 +6746,7 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nTurboShare server stopped cleanly.")
+        print("\nHostDrop server stopped cleanly.")
 
 
 if __name__ == "__main__":

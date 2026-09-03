@@ -1,11 +1,11 @@
 @echo off
-title TurboShare — Cross-Device File Transfer Hub
+title HostDrop — Cross-Device File Transfer Hub
 chcp 65001 >nul
 color 0b
 
 echo.
 echo  ====================================================================
-echo     TurboShare  —  2-Way Cross-Device File Transfer Hub
+echo     HostDrop  —  2-Way Cross-Device File Transfer Hub
 echo  ====================================================================
 echo.
 
@@ -30,17 +30,17 @@ python -m pip install qrcode[pil] psutil --quiet --exists-action i >nul 2>&1
 
 :: Ask for receive folder (Inbox)
 echo  Where do you want to save INCOMING files on this PC (Inbox)?
-echo  (Press ENTER to use D:\TurboShare, or type a custom path)
+echo  (Press ENTER to use D:\HostDrop, or type a custom path)
 echo.
 set /p RECV_DIR="  > Inbox folder path: "
 
 if "%RECV_DIR%"=="" (
-    set RECV_DIR=D:\TurboShare
+    set RECV_DIR=D:\HostDrop
 )
 
 echo.
 echo  ====================================================================
-echo     Starting TurboShare Hub on http://127.0.0.1:8080 ...
+echo     Starting HostDrop Hub on http://127.0.0.1:8080 ...
 echo     Opening dashboard in your default browser...
 echo  ====================================================================
 echo.
@@ -48,9 +48,9 @@ echo.
 :: Automatically open default browser in background
 start "" http://127.0.0.1:8080
 
-:: Start TurboShare server in foreground to maintain active terminal session
-python "%~dp0turboshare.py" "%RECV_DIR%"
+:: Start HostDrop server in foreground to maintain active terminal session
+python "%~dp0hostdrop.py" "%RECV_DIR%"
 
 echo.
-echo  TurboShare has stopped.
+echo  HostDrop has stopped.
 pause

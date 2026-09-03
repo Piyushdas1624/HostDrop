@@ -1,5 +1,5 @@
 """
-TurboShare Hardened Authentication, Rate Limiting & Session Engine
+HostDrop Hardened Authentication, Rate Limiting & Session Engine
 Zero-Dependency Standard Library Implementation (Python 3.8+)
 
 Implements:
@@ -32,7 +32,7 @@ from typing import Optional, Tuple, Dict, List, Any
 # ── Configuration Constants ───────────────────────────────────────────────────
 CONFIG_FILE = ".env"
 SESSIONS_FILE = ".sessions.json"
-SESSION_COOKIE_NAME = "turboshare_session"
+SESSION_COOKIE_NAME = "hostdrop_session"
 DEFAULT_ITERATIONS = 600_000
 SESSION_TTL_DAYS = 30
 RATE_LIMIT_WINDOW = 900          # 15 minutes in seconds
@@ -490,19 +490,19 @@ class SecurityConfig:
             dirty = False
 
             # 1. Server Secret Key for HMAC Session Tokens (256-bit entropy)
-            if "TURBOSHARE_SECRET_KEY" in env_vars and len(env_vars["TURBOSHARE_SECRET_KEY"]) >= 32:
-                self.secret_key = env_vars["TURBOSHARE_SECRET_KEY"]
+            if "HOSTDROP_SECRET_KEY" in env_vars and len(env_vars["HOSTDROP_SECRET_KEY"]) >= 32:
+                self.secret_key = env_vars["HOSTDROP_SECRET_KEY"]
             else:
                 self.secret_key = secrets.token_hex(32)
-                env_vars["TURBOSHARE_SECRET_KEY"] = self.secret_key
+                env_vars["HOSTDROP_SECRET_KEY"] = self.secret_key
                 dirty = True
 
             # 2. URL-Safe Bookmarkable Secret Access Key
-            if "TURBOSHARE_ACCESS_KEY" in env_vars and len(env_vars["TURBOSHARE_ACCESS_KEY"]) >= 16:
-                self.access_key = env_vars["TURBOSHARE_ACCESS_KEY"]
+            if "HOSTDROP_ACCESS_KEY" in env_vars and len(env_vars["HOSTDROP_ACCESS_KEY"]) >= 16:
+                self.access_key = env_vars["HOSTDROP_ACCESS_KEY"]
             else:
                 self.access_key = "ts_live_" + secrets.token_urlsafe(24)
-                env_vars["TURBOSHARE_ACCESS_KEY"] = self.access_key
+                env_vars["HOSTDROP_ACCESS_KEY"] = self.access_key
                 dirty = True
 
             # 3. Master Passphrase & Hash (PBKDF2-HMAC-SHA256, 600,000 iterations)
@@ -512,47 +512,47 @@ class SecurityConfig:
                 self.raw_password = raw_pwd
                 self.password_hash = self.hash_password(raw_pwd)
                 self.is_custom_passcode = True
-                env_vars["TURBOSHARE_PASSCODE"] = raw_pwd
-                env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
-                env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "true"
+                env_vars["HOSTDROP_PASSCODE"] = raw_pwd
+                env_vars["HOSTDROP_PASSWORD_HASH"] = self.password_hash
+                env_vars["HOSTDROP_IS_CUSTOM_PASSCODE"] = "true"
                 del env_vars["APP_PASSWORD"]
                 dirty = True
                 print("[AUTH NOTICE] Migrated plaintext APP_PASSWORD to salted PBKDF2-HMAC-SHA256 hash and passcode in .env")
-            elif "TURBOSHARE_PASSCODE" in env_vars and env_vars["TURBOSHARE_PASSCODE"]:
-                raw_pwd = env_vars["TURBOSHARE_PASSCODE"]
+            elif "HOSTDROP_PASSCODE" in env_vars and env_vars["HOSTDROP_PASSCODE"]:
+                raw_pwd = env_vars["HOSTDROP_PASSCODE"]
                 self.raw_password = raw_pwd
-                if "TURBOSHARE_IS_CUSTOM_PASSCODE" in env_vars:
-                    self.is_custom_passcode = env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
+                if "HOSTDROP_IS_CUSTOM_PASSCODE" in env_vars:
+                    self.is_custom_passcode = env_vars["HOSTDROP_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
 
-                if "TURBOSHARE_PASSWORD_HASH" in env_vars and env_vars["TURBOSHARE_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
-                    self.password_hash = env_vars["TURBOSHARE_PASSWORD_HASH"]
+                if "HOSTDROP_PASSWORD_HASH" in env_vars and env_vars["HOSTDROP_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
+                    self.password_hash = env_vars["HOSTDROP_PASSWORD_HASH"]
                     if not self.verify_password(raw_pwd):
-                        # User manually updated TURBOSHARE_PASSCODE in .env! Re-hash and synchronize
+                        # User manually updated HOSTDROP_PASSCODE in .env! Re-hash and synchronize
                         self.password_hash = self.hash_password(raw_pwd)
                         self.is_custom_passcode = True
-                        env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
-                        env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "true"
+                        env_vars["HOSTDROP_PASSWORD_HASH"] = self.password_hash
+                        env_vars["HOSTDROP_IS_CUSTOM_PASSCODE"] = "true"
                         dirty = True
                 else:
                     # Passcode present without valid hash, derive and store hash
                     self.password_hash = self.hash_password(raw_pwd)
-                    env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
+                    env_vars["HOSTDROP_PASSWORD_HASH"] = self.password_hash
                     dirty = True
-            elif "TURBOSHARE_PASSWORD_HASH" in env_vars and env_vars["TURBOSHARE_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
+            elif "HOSTDROP_PASSWORD_HASH" in env_vars and env_vars["HOSTDROP_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
                 # Hash-only mode (backward compatibility / hardened deployment)
-                self.password_hash = env_vars["TURBOSHARE_PASSWORD_HASH"]
+                self.password_hash = env_vars["HOSTDROP_PASSWORD_HASH"]
                 self.raw_password = ""
-                if "TURBOSHARE_IS_CUSTOM_PASSCODE" in env_vars:
-                    self.is_custom_passcode = env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
+                if "HOSTDROP_IS_CUSTOM_PASSCODE" in env_vars:
+                    self.is_custom_passcode = env_vars["HOSTDROP_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
             else:
                 # Auto-generate memorable passcode in word-word-NN format
                 generated_pwd = generate_passcode()
                 self.raw_password = generated_pwd
                 self.password_hash = self.hash_password(generated_pwd)
                 self.is_custom_passcode = False
-                env_vars["TURBOSHARE_PASSCODE"] = generated_pwd
-                env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
-                env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "false"
+                env_vars["HOSTDROP_PASSCODE"] = generated_pwd
+                env_vars["HOSTDROP_PASSWORD_HASH"] = self.password_hash
+                env_vars["HOSTDROP_IS_CUSTOM_PASSCODE"] = "false"
                 dirty = True
                 print("\n" + "=" * 68)
                 print("  [SECURITY NOTICE] AUTO-GENERATED MEMORABLE MASTER APP PASSCODE:")
@@ -577,7 +577,7 @@ class SecurityConfig:
             if dirty:
                 try:
                     with open(self.env_path, "w", encoding="utf-8") as f:
-                        f.write("# TurboShare Hardened Security Configuration\n")
+                        f.write("# HostDrop Hardened Security Configuration\n")
                         f.write("# Generated automatically on startup\n\n")
                         for k, v in env_vars.items():
                             f.write(f"{k}={v}\n")
@@ -1012,14 +1012,14 @@ def change_master_password(new_password: str, revoke_all_sessions: bool = True) 
     passcode_written = False
     custom_written = False
     for line in lines:
-        if line.strip().startswith("TURBOSHARE_PASSWORD_HASH="):
-            new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
+        if line.strip().startswith("HOSTDROP_PASSWORD_HASH="):
+            new_lines.append(f"HOSTDROP_PASSWORD_HASH={new_hash}\n")
             hash_written = True
-        elif line.strip().startswith("TURBOSHARE_PASSCODE="):
-            new_lines.append(f"TURBOSHARE_PASSCODE={cleaned}\n")
+        elif line.strip().startswith("HOSTDROP_PASSCODE="):
+            new_lines.append(f"HOSTDROP_PASSCODE={cleaned}\n")
             passcode_written = True
-        elif line.strip().startswith("TURBOSHARE_IS_CUSTOM_PASSCODE="):
-            new_lines.append("TURBOSHARE_IS_CUSTOM_PASSCODE=true\n")
+        elif line.strip().startswith("HOSTDROP_IS_CUSTOM_PASSCODE="):
+            new_lines.append("HOSTDROP_IS_CUSTOM_PASSCODE=true\n")
             custom_written = True
         elif line.strip().startswith("APP_PASSWORD="):
             continue
@@ -1027,11 +1027,11 @@ def change_master_password(new_password: str, revoke_all_sessions: bool = True) 
             new_lines.append(line)
 
     if not passcode_written:
-        new_lines.append(f"TURBOSHARE_PASSCODE={cleaned}\n")
+        new_lines.append(f"HOSTDROP_PASSCODE={cleaned}\n")
     if not hash_written:
-        new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
+        new_lines.append(f"HOSTDROP_PASSWORD_HASH={new_hash}\n")
     if not custom_written:
-        new_lines.append("TURBOSHARE_IS_CUSTOM_PASSCODE=true\n")
+        new_lines.append("HOSTDROP_IS_CUSTOM_PASSCODE=true\n")
 
     try:
         with open(env_path, "w", encoding="utf-8") as f:
