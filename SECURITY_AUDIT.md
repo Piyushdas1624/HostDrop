@@ -1,6 +1,6 @@
-# TurboShare Adversarial Cybersecurity Audit & Architectural Redesign Specification
+# HostDrop Adversarial Cybersecurity Audit & Architectural Redesign Specification
 
-**Target System**: TurboShare Multi-Platform File Transfer Engine  
+**Target System**: HostDrop Multi-Platform File Transfer Engine  
 **Document Version**: 1.0.0-PROD-SEC  
 **Security Classification**: CONFIDENTIAL & HIGH-ASSURANCE  
 **Audit Standard**: OWASP Top 10 (2021/2026), NIST SP 800-63B, CWE/SANS Top 25  
@@ -10,7 +10,7 @@
 
 ## 1. Executive Summary & Security Philosophy
 
-TurboShare is an ultra-fast, zero-dependency cross-device file transfer engine designed for PC-to-PC, PC-to-mobile, and mobile-to-PC data transfer. While initially architected for trusted, isolated Local Area Networks (Wi-Fi, direct Ethernet, and Mobile Hotspot), extending TurboShare to support **Global Remote Access via reverse tunnels (Cloudflare Tunnel, Pinggy SSH, ngrok)** fundamentally transforms its operational threat environment.
+HostDrop is an ultra-fast, zero-dependency cross-device file transfer engine designed for PC-to-PC, PC-to-mobile, and mobile-to-PC data transfer. While initially architected for trusted, isolated Local Area Networks (Wi-Fi, direct Ethernet, and Mobile Hotspot), extending HostDrop to support **Global Remote Access via reverse tunnels (Cloudflare Tunnel, Pinggy SSH, ngrok)** fundamentally transforms its operational threat environment.
 
 Exposing a local HTTP file server to the open internet exposes it to automated vulnerability scanners, credential stuffers, dictionary botnets, and targeted adversarial exploitation. Prior versions of the application operated under the implicit assumption of trusted physical and network adjacency, leaving critical gaps:
 1. Complete absence of authentication on high-privilege administrative endpoints.
@@ -42,7 +42,7 @@ This specification documents the **zero-trust adversarial cybersecurity audit**,
                                        │ Direct Loopback HTTP (127.0.0.1:8080)
                                        ▼
  ┌────────────────────────────────────────────────────────────────────────────┐
- │                     TURBOSHARE ZERO-TRUST DEFENSE GATE                     │
+ │                     HOSTDROP ZERO-TRUST DEFENSE GATE                     │
  │ 1. Trust-Aware Client IP Extraction (Prevent LAN Spoofing & Tunnel Collapse│
  │ 2. Sliding-Window Rate Limiter & Exponential Delay Tarpitting              │
  │ 3. PBKDF2-HMAC-SHA256 Passphrase & Signed Stateless Session Tokens        │
@@ -88,7 +88,7 @@ When running behind a local tunnel daemon, every incoming connection from the in
 | **A02:2021 — Cryptographic Failures** | **9.8 (Critical)** | Storing passwords in plaintext or using weak/unsalted hashing; unauthenticated session tokens. | Attacker recovers plaintext password from config files or forges unsigned session cookies. | Salted PBKDF2-HMAC-SHA256 (600,000 iterations), 256-bit cryptographically signed session tokens with HMAC-SHA256. |
 | **A03:2021 — Injection** | **8.6 (High)** | Unsanitized path parameters passed to system commands (`explorer.exe` / PowerShell dialogs). | Attacker injects special characters or UNC paths to trigger remote OS execution or GUI window flooding. | Complete parameter sanitization, removal of shell interpolation, and strict confinement of OS GUI triggers to local host. |
 | **A04:2021 — Insecure Design** | **8.2 (High)** | In-memory ZIP compression (`io.BytesIO()`) buffering gigabyte-scale directories on the Python heap. | Attacker requests `/api/zip` on a 10GB folder; Python triggers `MemoryError` or process OOM termination. | Memory-bounded streaming ZIP generator or temporary spooling with recursive depth and total size ceilings. |
-| **A05:2021 — Security Misconfiguration** | **8.5 (High)** | Universal wildcard `Access-Control-Allow-Origin: *` headers paired with state-mutating endpoints. | Attacker lures host user to a malicious site; malicious JS issues background `fetch()` to exfiltrate files. | Removal of wildcard CORS headers; enforce `SameSite=Strict` cookies and custom header validation (`X-TurboShare-Auth`). |
+| **A05:2021 — Security Misconfiguration** | **8.5 (High)** | Universal wildcard `Access-Control-Allow-Origin: *` headers paired with state-mutating endpoints. | Attacker lures host user to a malicious site; malicious JS issues background `fetch()` to exfiltrate files. | Removal of wildcard CORS headers; enforce `SameSite=Strict` cookies and custom header validation (`X-HostDrop-Auth`). |
 | **A06:2021 — Vulnerable Components** | **0.0 (None)** | Dependency vulnerabilities in third-party web frameworks. | Supply-chain attacks on dependencies. | Zero external dependencies; 100% Python standard library implementation (`http.server`, `hashlib`, `hmac`, `secrets`). |
 | **A07:2021 — Auth & Identification Failures** | **8.1 (High)** | Lack of rate limiting and exponential delay tarpitting against dictionary/brute-force attacks. | Botnet sprays thousands of passwords against public tunnel within seconds. | In-memory sliding-window rate limiter (5 failed attempts per 15 min) with exponential tarpitting ($1\text{s} \to 16\text{s}$). |
 | **A08:2021 — Software & Data Integrity** | **9.1 (Critical)** | Unrestricted file uploads allowing script drop into system startup folders. | Attacker uploads `.bat` / `.vbs` to Windows Startup folder via manipulated upload path. | Strict path validation (`safe_path`), extension screening, and sandboxing against directory traversal. |
@@ -102,7 +102,7 @@ When running behind a local tunnel daemon, every incoming connection from the in
 "Vibecoding" refers to rapid AI-assisted development focused on immediate functional aesthetics and user flow, often neglecting adversarial boundary conditions and threat modeling:
 
 ### 4.1 Host Username & Absolute Path Disclosure
-* **Hazard**: String interpolation substituting `os.path.expanduser("~")` or `UPLOAD_DIR` directly into client HTML (e.g. `C:\Users\Username\Downloads\TurboShare`).
+* **Hazard**: String interpolation substituting `os.path.expanduser("~")` or `UPLOAD_DIR` directly into client HTML (e.g. `C:\Users\Username\Downloads\HostDrop`).
 * **Vulnerability**: Unauthenticated internet visitors learn the host OS, username (`Username`), directory structure, and volume configuration.
 * **Hardening**: Virtualize paths in client responses (e.g. `[Inbox Storage]`, `[Library Storage]`). Mask absolute host paths from all unauthenticated or guest responses.
 
@@ -144,9 +144,9 @@ When running behind a local tunnel daemon, every incoming connection from the in
 * **Derived Key Length**: $32$ bytes ($256$ bits)
 * **Storage Format in `.env`**:
   ```ini
-  TURBOSHARE_PASSWORD_HASH=pbkdf2_sha256$600000$<salt_hex>$<dk_hex>
-  TURBOSHARE_SECRET_KEY=<64_char_hex_secret>
-  TURBOSHARE_ACCESS_KEY=ts_live_<urlsafe_token>
+  HOSTDROP_PASSWORD_HASH=pbkdf2_sha256$600000$<salt_hex>$<dk_hex>
+  HOSTDROP_SECRET_KEY=<64_char_hex_secret>
+  HOSTDROP_ACCESS_KEY=ts_live_<urlsafe_token>
   ```
 * **Verification**: Evaluated strictly via `hmac.compare_digest(actual_dk, expected_dk)` with constant-time exception safety.
 
@@ -162,15 +162,15 @@ When running behind a local tunnel daemon, every incoming connection from the in
   - `HMAC Signature`: $\text{HMAC-SHA256}_{\text{SECRET\_KEY}}(\text{Payload})$
 * **Cookie Flags**:
   ```http
-  Set-Cookie: turboshare_session=v1.e3b0c44298fc1c149afbf4c8996fb924.1772314000.1774906000.8a3f9d12.3c8b...; Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict; Secure
+  Set-Cookie: hostdrop_session=v1.e3b0c44298fc1c149afbf4c8996fb924.1772314000.1774906000.8a3f9d12.3c8b...; Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict; Secure
   ```
-* **Crash Resilience**: Because the session token is statelessly signed with `TURBOSHARE_SECRET_KEY`, sessions persist seamlessly across server reboots without database dependency.
+* **Crash Resilience**: Because the session token is statelessly signed with `HOSTDROP_SECRET_KEY`, sessions persist seamlessly across server reboots without database dependency.
 
 ### 5.3 URL-Safe Bookmarked Key Auto-Login (303 PRG Protocol)
-To enable mobile smartphone access without requiring password entry on touchscreens, TurboShare supports a zero-leak bookmark authentication protocol:
+To enable mobile smartphone access without requiring password entry on touchscreens, HostDrop supports a zero-leak bookmark authentication protocol:
 1. Mobile user navigates to bookmarked URL: `GET /api/auth?key=ts_live_...`
 2. Server validates key in constant time via `hmac.compare_digest`.
-3. If valid, server sets `turboshare_session` cookie and issues `HTTP 303 See Other` to `Location: /`.
+3. If valid, server sets `hostdrop_session` cookie and issues `HTTP 303 See Other` to `Location: /`.
 4. Server includes `Referrer-Policy: no-referrer` and `Cache-Control: no-store, no-cache`.
 5. Browser stores the cookie and navigates to clean root `/`, immediately scrubbing the secret access key from browser history, address bar, and outgoing referer headers.
 
@@ -280,11 +280,11 @@ $$\forall \text{Dir } D \text{ with size } S(D): \text{HeapAllocation}(\text{Zip
 
 #### Test Case SEC-AUTH-002: Forged HMAC Session Signature Rejection
 * **Objective**: Verify tampered session token payloads are rejected.
-* **Input**: Cookie `turboshare_session=v1.forged_session.1772314000.1774906000.8a3f9d12.0000000000000000000000000000000000000000000000000000000000000000`.
+* **Input**: Cookie `hostdrop_session=v1.forged_session.1772314000.1774906000.8a3f9d12.0000000000000000000000000000000000000000000000000000000000000000`.
 * **Expected Output**: HTTP Status `401 Unauthorized`.
 * **CLI Verification**:
   ```bash
-  curl -s -b "turboshare_session=v1.forged.1772314000.1774906000.8a3f9d12.000000" http://127.0.0.1:8080/api/list
+  curl -s -b "hostdrop_session=v1.forged.1772314000.1774906000.8a3f9d12.000000" http://127.0.0.1:8080/api/list
   # Expected: 401
   ```
 
@@ -299,7 +299,7 @@ $$\forall \text{Dir } D \text{ with size } S(D): \text{HeapAllocation}(\text{Zip
 * **Expected Output**:
   - HTTP Status `303 See Other`
   - Header `Location: /`
-  - Header `Set-Cookie: turboshare_session=...; HttpOnly; SameSite=Strict`
+  - Header `Set-Cookie: hostdrop_session=...; HttpOnly; SameSite=Strict`
   - Header `Referrer-Policy: no-referrer`
   - Header `Cache-Control: no-store, no-cache`
 * **CLI Verification**:
@@ -433,7 +433,7 @@ curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8080/download?tab=rec
 
 # 4. Verify URL-Safe Auto-Login & 303 Clean Redirect
 curl -s -I "http://127.0.0.1:8080/api/auth?key=ts_live_testkey"
-# Must return: HTTP/1.1 303 See Other, Location: /, Set-Cookie: turboshare_session=...
+# Must return: HTTP/1.1 303 See Other, Location: /, Set-Cookie: hostdrop_session=...
 
 # 5. Verify Rate-Limiting Lockout (Run 6 invalid attempts)
 for i in {1..6}; do
@@ -450,15 +450,15 @@ python test_security.py
 ## 9. Security Invariants, Operational Policies & Remote Drive Access Liability Disclaimers
 
 ### 9.1 Multi-User & Zero-Trust Deployment Guidelines
-When hosting TurboShare on untrusted public networks or exposing it globally:
-1. **Never Expose Plaintext Passwords**: Ensure `TURBOSHARE_PASSWORD_HASH` in `.env` is a salted PBKDF2 hash.
+When hosting HostDrop on untrusted public networks or exposing it globally:
+1. **Never Expose Plaintext Passwords**: Ensure `HOSTDROP_PASSWORD_HASH` in `.env` is a salted PBKDF2 hash.
 2. **Tunnel Authentication Layering**: For sensitive environments, place the reverse tunnel behind an edge identity provider (e.g. Cloudflare Access with Email OTP / GitHub OAuth).
-3. **Dedicated Storage Partitioning**: Designate a dedicated non-system directory (e.g. `D:\TurboShare`) for transfers rather than drive roots (`C:\`).
+3. **Dedicated Storage Partitioning**: Designate a dedicated non-system directory (e.g. `D:\HostDrop`) for transfers rather than drive roots (`C:\`).
 
 ### 9.2 Remote Drive Access Liability Disclaimer
 
 > **IMPORTANT OPERATIONAL & LIABILITY NOTICE**:  
-> TurboShare provides high-performance file transfer and remote file management capabilities. Operating TurboShare with public reverse tunnels (Cloudflare Tunnel, Pinggy, ngrok) grants authorized remote sessions access to configured directories on the host operating system.  
+> HostDrop provides high-performance file transfer and remote file management capabilities. Operating HostDrop with public reverse tunnels (Cloudflare Tunnel, Pinggy, ngrok) grants authorized remote sessions access to configured directories on the host operating system.  
 > 
 > The system administrator / host PC operator assumes sole legal and technical responsibility for:
 > - Safeguarding master authentication passphrases, secret encryption keys, and bookmarked access URLs.
@@ -466,7 +466,7 @@ When hosting TurboShare on untrusted public networks or exposing it globally:
 > - Enabling or disabling full drive navigation (`ALLOW_FULL_DRIVE_REMOTE`).
 > - Complying with applicable data protection, privacy, and cybersecurity regulations.
 > 
-> TurboShare, its authors, and contributors disclaim all liability for any direct, indirect, incidental, or consequential damages resulting from unauthorized access, credential disclosure, data loss, disk exhaustion, or system compromise arising from misconfigured tunnels or compromised client endpoints.
+> HostDrop, its authors, and contributors disclaim all liability for any direct, indirect, incidental, or consequential damages resulting from unauthorized access, credential disclosure, data loss, disk exhaustion, or system compromise arising from misconfigured tunnels or compromised client endpoints.
 
 ---
-*End of TurboShare Adversarial Cybersecurity Audit Specification.*
+*End of HostDrop Adversarial Cybersecurity Audit Specification.*
