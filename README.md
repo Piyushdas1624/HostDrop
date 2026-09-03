@@ -126,21 +126,59 @@ When downloading directories from the Library tab:
 
 ---
 
-## Global remote access (access from anywhere)
+## Global Remote Access (Access From Anywhere)
 
-TurboShare includes built-in encrypted tunneling so you can access your home computer from anywhere in the world on mobile data or outside Wi-Fi.
+TurboShare provides built-in encrypted tunneling so you can securely access your home PC from across town or across the globe over mobile cellular data or external Wi-Fi—without port forwarding, static public IPs, or router configuration.
 
-### How it works
+### How It Works Automatically
 
-1. When TurboShare launches, it automatically checks for Cloudflare Tunnel (`cloudflared`) or Windows OpenSSH (`ssh` to Pinggy).
-2. A secure public HTTPS link is displayed in the terminal and on the dashboard.
-3. Access to host files is guarded by a dual-anchor persistent security architecture:
-   - **Master Passcode**: Salted PBKDF2-HMAC-SHA256 hash (600,000 iterations) stored in `.env`.
-   - **Bookmark Access Key**: A persistent access key (`ts_live_...`) for 1-click browser auto-login that sets a long-lived 30-day session cookie (`turboshare_session`).
-   - **Brute-Force Shield**: Sliding-window IP rate limiting (max 5 failed attempts per 15 minutes) with exponential tarpitting ($1\text{s} \to 16\text{s}$) and automatic HTTP 429 lockout.
-   - **Security Sandboxing**: Host drives and internal operating system paths are masked from remote guests. Direct Windows Explorer triggers and GUI dialogs are disabled over public tunnels.
+When TurboShare starts, it automatically orchestrates an outbound encrypted tunnel in the following order:
 
-See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model, penetration testing verification commands, and security specifications.
+1. **Primary: Cloudflare Quick Tunnel (Zero-Trust HTTPS)**
+   - TurboShare inspects `PATH` and standard Windows installation paths for `cloudflared.exe`.
+   - If present, it initializes an outbound TLS tunnel to Cloudflare's global edge network.
+   - An instant, public HTTPS address (e.g., `https://random-name.trycloudflare.com`) is displayed in your terminal banner and host dashboard.
+   - Traffic is encrypted end-to-end; no Cloudflare account, domain name, or configuration is required.
+
+2. **Automatic Fallback: Pinggy SSH Tunnel (Zero Downloads, Zero Configuration)**
+   - If `cloudflared` is not installed on your system, TurboShare automatically falls back to an encrypted reverse SSH tunnel via Pinggy.
+   - **Zero Downloads Required**: Uses Windows 10/11's built-in `ssh.exe` (`C:\Windows\System32\OpenSSH\ssh.exe`), which is pre-installed on all modern Windows installations.
+   - **Zero Configuration & No Account**: Automatically runs outbound over port 443 with keep-alives and yields an instant public HTTPS link (e.g., `https://random-name.a.pinggy.link`).
+
+### Optional 1-Click Cloudflare Tunnel Setup
+
+While Pinggy SSH works out of the box with zero downloads, you can optionally install Cloudflare Tunnel in one command via Windows Package Manager:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+After installation, restart TurboShare. It will automatically detect `cloudflared` and prioritize Cloudflare Tunnels.
+
+### 100% Offline LAN Guarantee
+
+TurboShare never requires an active internet connection to transfer files. If you are operating in air-gapped environments, on airplanes, on field sites, or simply do not want any global tunnels opened:
+
+- **Disable Remote Tunnels Completely**:
+  Launch TurboShare with the `--tunnel none` flag or set the environment variable `TUNNEL_PROVIDER=none`:
+  ```bash
+  python turboshare.py "D:\TurboShare" --tunnel none
+  ```
+- **Local Network Support**:
+  TurboShare works 100% locally over:
+  - **Local Wi-Fi Network**: Accessible to all devices on the same router subnet (`http://192.168.x.x:8080`).
+  - **Windows Mobile Hotspot**: Connect your phone directly to your laptop's 5 GHz hotspot (`http://192.168.137.1:8080`).
+  - **Direct Ethernet Cable**: Plug an RJ-45 cable directly between two PCs. Windows auto-assigns APIPA `169.254.x.x` addresses, enabling routerless transfers at 60–110 MB/s.
+
+### Remote Access Security Architecture
+
+When global remote tunnels are active, TurboShare enforces strict perimeter defenses:
+- **Auto-Generated Memorable Passcode**: 8–10 character memorable passcode (e.g., `star-falcon-42`) with $\ge 30.0$ bits entropy, hashed with 600,000 PBKDF2 iterations and persisted in `.env`.
+- **Sliding-Window Lockout & Tarpitting**: Max 5 failed attempts per 15 minutes, with exponential tarpitting delay ($1\text{s} \to 16\text{s}$) and automatic HTTP 429 lockout.
+- **Strict Host Isolation**: Endpoints for server security info, active sessions, session revocation, and Windows Explorer triggering return HTTP 403 Forbidden to any request passing through tunnel proxy headers (`Forwarded`, `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`).
+- **NTFS Path Traversal Shield**: All file interactions pass through canonical path validation blocking Alternate Data Streams (`::$DATA`), 8.3 short names, null bytes, and UNC namespace escapes.
+
+See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model and penetration testing verification.
 
 ---
 

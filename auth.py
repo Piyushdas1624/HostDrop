@@ -40,6 +40,419 @@ MAX_FAILED_ATTEMPTS = 5
 BASE_TARPIT_DELAY = 1.0         # seconds
 MAX_TARPIT_DELAY = 16.0         # seconds
 
+# 4,096 Curated Memorable English Words (2^12 = 12 bits per word)
+MEMORABLE_WORDS: Tuple[str, ...] = tuple((
+    "star falcon bold tiger swift frost shadow cedar river beacon pixel "
+    "orbit nexus wave stone sky fox hawk bear lion wolf peak creek cliff "
+    "flame spark amber jade ruby echo prism solar lunar comet nova atlas iron "
+    "steel sage moss pine maple elm oak ash dune reef canyon vale ridge crest "
+    "breeze storm dawn dusk haven harbor abandon ability able about above "
+    "absent absorb absurd abuse access account accuse achieve acid acquire "
+    "across act action actor actress actual adapt add addict address adjust "
+    "admit adult advance advice aerobic affair afford afraid again age agent "
+    "agree ahead aim air airport aisle alarm album alcohol alert alien all "
+    "alley allow almost alone alpha already also alter always amateur amazing "
+    "among amount amused analyst anchor ancient anger angle angry animal "
+    "ankle annual another answer antenna antique anxiety any apart apology "
+    "appear apple approve april arch arctic area arena argue arm armed armor "
+    "army around arrange arrest arrive arrow art artist artwork ask aspect "
+    "assault asset assist assume asthma athlete atom attack attend attract "
+    "auction audit august aunt author auto autumn average avocado avoid awake "
+    "aware away awesome awful awkward axis baby bacon badge bag balance "
+    "balcony ball bamboo banana banner bar barely bargain barrel base basic "
+    "basket battle beach bean beauty because become beef before begin behave "
+    "behind believe below belt bench benefit best betray better between "
+    "beyond bicycle bid bike bind biology bird birth bitter black blade blame "
+    "blanket blast bleak bless blind blood blossom blouse blue blur blush "
+    "board boat body boil bomb bone bonus book boost border boring borrow "
+    "boss bottom bounce box boy bracket brain brand brass brave bread brick "
+    "bridge brief bright bring brisk broken bronze broom brother brown brush "
+    "bubble buddy budget buffalo build bulb bulk bullet bundle bunker burden "
+    "burger burst bus busy butter buyer buzz cabbage cabin cable cactus cage "
+    "cake call calm camera camp can canal cancel candy cannon canoe canvas "
+    "capable capital captain car carbon card cargo carpet carry cart case "
+    "cash casino castle casual cat catalog catch cattle caught cause caution "
+    "cave ceiling celery cement census century cereal certain chair chalk "
+    "change chaos chapter charge chase chat cheap check cheese chef cherry "
+    "chest chicken chief child chimney choice choose chronic chuckle chunk "
+    "churn cigar circle citizen city civil claim clap clarify claw clay clean "
+    "clerk clever click client climb clinic clip clock clog close cloth cloud "
+    "clown club clump cluster clutch coach coast coconut code coffee coil "
+    "coin collect color column combine come comfort comic common company "
+    "concert conduct confirm connect control cook cool copper copy coral core "
+    "corn correct cost cotton couch country couple course cousin cover coyote "
+    "crack cradle craft cram crane crash crater crawl crazy cream credit crew "
+    "cricket crime crisp critic crop cross crouch crowd crucial cruel cruise "
+    "crumble crunch crush cry crystal cube culture cup curious current "
+    "curtain curve cushion custom cute cycle dad damage damp dance danger "
+    "daring dash day deal debate debris decade decide decline deer defense "
+    "define defy degree delay deliver demand demise denial dentist deny "
+    "depart depend deposit depth deputy derive desert design desk despair "
+    "destroy detail detect develop device devote diagram dial diamond diary "
+    "dice diesel diet differ digital dignity dilemma dinner direct dirt "
+    "disease dish dismiss display divert divide divorce dizzy doctor dog doll "
+    "dolphin domain donate donkey donor door dose double dove draft dragon "
+    "drama drastic draw dream dress drift drill drink drip drive drop drum "
+    "dry duck dumb during dust dutch duty dwarf dynamic eager eagle early "
+    "earn earth easily east easy ecology economy edge edit educate effort egg "
+    "eight either elbow elder elegant element elite else embark embody "
+    "embrace emerge emotion employ empower empty enable enact end endless "
+    "endorse enemy energy enforce engage engine enhance enjoy enlist enough "
+    "enrich enroll ensure enter entire entry episode equal equip era erase "
+    "erode erosion error erupt escape essay essence estate eternal ethics "
+    "evil evoke evolve exact example excess excite exclude excuse execute "
+    "exhaust exhibit exile exist exit exotic expand expect expire explain "
+    "expose express extend extra eye eyebrow fabric face faculty fade faint "
+    "faith fall false fame family famous fan fancy fantasy farm fashion fat "
+    "fatal father fatigue fault feature federal fee feed feel female fence "
+    "fetch fever few fiber fiction field figure file film filter final find "
+    "fine finger finish fire firm first fiscal fish fit fitness fix flag "
+    "flash flat flavor flee flight flip float flock floor flower fluid flush "
+    "fly foam focus fog foil fold follow food foot force forest forget fork "
+    "fortune forum forward fossil foster found fragile frame fresh friend "
+    "fringe frog front frown frozen fruit fuel fun funny furnace fury future "
+    "gadget gain galaxy gallery game gap garage garbage garden garlic garment "
+    "gas gasp gate gather gauge gaze general genius genre gentle genuine "
+    "gesture ghost giant gift giggle ginger giraffe girl give glad glance "
+    "glare glass glide glimpse globe gloom glory glove glow glue goat goddess "
+    "gold good goose gorilla gospel gossip govern gown grab grace grain grant "
+    "grape grass gravity great green grid grief grit grocery group grow grunt "
+    "guard guess guide guilt guitar gun gym habit hair half hammer hamster "
+    "hand happy hard harsh harvest hat have hazard head health heart heavy "
+    "height hello helmet help hen hero hidden high hill hint hip hire history "
+    "hobby hockey hold hole holiday hollow home honey hood hope horn horror "
+    "horse host hotel hour hover hub huge human humble humor hundred hungry "
+    "hunt hurdle hurry hurt husband hybrid ice icon idea idle ignore ill "
+    "illegal illness image imitate immense immune impact impose improve "
+    "impulse inch include income index indoor infant inflict inform inhale "
+    "inherit initial inject injury inmate inner input inquiry insane insect "
+    "inside inspire install intact into invest invite involve island isolate "
+    "issue item ivory jacket jaguar jar jazz jealous jeans jelly jewel job "
+    "join joke journey joy judge juice jump jungle junior junk just keen keep "
+    "ketchup key kick kid kidney kind kingdom kiss kit kitchen kite kitten "
+    "kiwi knee knife knock know lab label labor ladder lady lake lamp laptop "
+    "large later latin laugh laundry lava law lawn lawsuit layer lazy leader "
+    "leaf learn leave lecture left leg legal legend leisure lemon lend length "
+    "lens leopard lesson letter level liar liberty library license life lift "
+    "light like limb limit link liquid list little live lizard load loan "
+    "lobster local lock logic lonely long loop lottery loud lounge love loyal "
+    "lucky luggage lumber lunch luxury lyrics machine mad magic magnet maid "
+    "mail main major make mammal man manage mandate mango mansion manual "
+    "marble march margin marine market mask mass master match math matrix "
+    "matter maximum maze meadow mean measure meat medal media melody melt "
+    "member memory mention menu mercy merge merit merry mesh message metal "
+    "method middle milk million mimic mind minimum minor minute miracle "
+    "mirror misery miss mistake mix mixed mixture mobile model modify mom "
+    "moment monitor monkey monster month moon moral more morning mother "
+    "motion motor mouse move movie much muffin mule muscle museum music must "
+    "mutual myself mystery myth naive name napkin narrow nasty nation nature "
+    "near neck need neglect neither nephew nerve nest net network neutral "
+    "never news next nice night noble noise nominee noodle normal north nose "
+    "notable note nothing notice novel now nuclear number nurse nut obey "
+    "object oblige obscure observe obtain obvious occur ocean october odor "
+    "off offer office often oil okay old olive olympic omit once one onion "
+    "online only open opera opinion oppose option orange orchard order organ "
+    "orient orphan ostrich other outdoor outer output outside oval oven over "
+    "own owner oxygen oyster ozone pact paddle page pair palace palm panda "
+    "panel panic panther paper parade parent park parrot party pass patch "
+    "path patient patrol pattern pause pave payment peace peanut pear peasant "
+    "pelican pen penalty pencil people pepper perfect permit person pet phone "
+    "photo phrase piano picnic picture piece pig pigeon pill pilot pink "
+    "pioneer pipe pistol pitch pizza place planet plastic plate play please "
+    "pledge pluck plug plunge poem poet point polar pole police pond pony "
+    "pool popular portion post potato pottery poverty powder power praise "
+    "predict prefer prepare present pretty prevent price pride primary print "
+    "prison private prize problem process produce profit program project "
+    "promote proof prosper protect proud provide public pudding pull pulp "
+    "pulse pumpkin punch pupil puppy purity purpose purse push put puzzle "
+    "pyramid quality quantum quarter quick quit quiz quote rabbit raccoon "
+    "race rack radar radio rail rain raise rally ramp ranch random range "
+    "rapid rare rate rather raven raw razor ready real reason rebel rebuild "
+    "recall receive recipe record recycle reduce reflect reform refuse region "
+    "regret regular reject relax release relief rely remain remind remove "
+    "render renew rent reopen repair repeat replace report require rescue "
+    "resist result retire retreat return reunion reveal review reward rhythm "
+    "rib ribbon rice rich ride rifle right rigid ring riot ripple risk ritual "
+    "rival road roast robot robust rocket romance roof rookie room rose "
+    "rotate rough round route royal rubber rude rug rule run runway rural sad "
+    "saddle sadness safe sail salad salmon salon salt salute same sample sand "
+    "satisfy satoshi sauce sausage save say scale scan scare scatter scene "
+    "scheme school science scout scrap screen script scrub sea search season "
+    "seat second secret section seed seek segment select sell seminar senior "
+    "sense series service session settle setup seven shaft shallow share shed "
+    "shell sheriff shield shift shine ship shiver shock shoe shoot shop short "
+    "shove shrimp shrug shuffle shy sibling sick side siege sight sign silent "
+    "silk silly silver similar simple since sing siren sister situate six "
+    "size skate sketch ski skill skin skirt skull slab slam sleep slender "
+    "slice slide slight slim slogan slot slow slush small smart smile smoke "
+    "smooth snack snake snap sniff snow soap soccer social sock soda soft "
+    "soldier solid solve someone song soon sorry sort soul sound soup source "
+    "south space spare spatial spawn speak special speed spell spend sphere "
+    "spice spider spike spin spirit split spoil sponsor spoon sport spot "
+    "spray spread spring spy square squeeze stable stadium staff stage stairs "
+    "stamp stand start state stay steak stem step stereo stick still sting "
+    "stock stomach stool story stove street strike strong student stuff "
+    "stumble style subject submit subway success such sudden suffer sugar "
+    "suggest suit summer sun sunny sunset super supply supreme sure surface "
+    "surge survey suspect sustain swallow swamp swap swarm swear sweet swim "
+    "swing switch sword symbol symptom syrup system table tackle tag tail "
+    "talent talk tank tape target task taste tattoo taxi teach team tell ten "
+    "tenant tennis tent term test text thank that theme then theory there "
+    "they thing this thought three thrive throw thumb thunder ticket tide "
+    "tilt timber time tiny tip tired tissue title toast tobacco today toddler "
+    "toe toilet token tomato tone tongue tonight tool tooth top topic topple "
+    "torch tornado toss total tourist toward tower town toy track trade "
+    "traffic tragic train trap trash travel tray treat tree trend trial tribe "
+    "trick trigger trim trip trophy trouble truck true truly trumpet trust "
+    "truth try tube tuition tumble tuna tunnel turkey turn turtle twelve "
+    "twenty twice twin twist two type typical ugly unable unaware uncle "
+    "uncover under undo unfair unfold unhappy uniform unique unit unknown "
+    "unlock until unusual unveil update upgrade uphold upon upper upset urban "
+    "urge usage use used useful useless usual utility vacant vacuum vague "
+    "valid valley valve van vanish vapor various vast vault vehicle velvet "
+    "vendor venture venue verb verify version very vessel veteran viable "
+    "vibrant vicious victory video view village vintage violin virtual virus "
+    "visa visit visual vital vivid vocal voice void volcano volume vote "
+    "voyage wage wagon wait walk wall walnut want warfare warm warrior wash "
+    "wasp waste water way wealth weapon wear weasel weather web wedding "
+    "weekend weird welcome west wet whale what wheat wheel when where whip "
+    "whisper wide width wife wild will win window wine wing wink winner "
+    "winter wire wisdom wise wish witness woman wonder wood wool word work "
+    "world worry worth wrap wreck wrestle wrist write wrong yard year yellow "
+    "you young youth zebra zero zone zoo abacus abdomen abide abiding ablaze "
+    "abreast abridge abroad absence absolve abstain accent acclaim acetone "
+    "aching acorn acre acrobat acronym acting active acts acutely aerosol "
+    "afar affirm affix affront aflame afloat afoot aged ageless agency agenda "
+    "aghast agile agility aging agonize agony agreed aground ahoy aide aids "
+    "ajar alfalfa algebra alias alibi aliens alike alive almanac aloe aloft "
+    "aloha aloof alright alto alumni amaze ambush amends amenity amiable amid "
+    "amigo amino amiss ammonia amnesty ample amplify amply amuck amulet "
+    "amuser amusing anagram anatomy anchovy android anemia anemic anew "
+    "angelic angled angler angles angling angrily angular animate anime annex "
+    "annuity antacid anthem anthill antics antler antonym antsy anvil anybody "
+    "anyhow anymore anyone anytime anyway aorta apache apostle appease "
+    "applaud applied apply apricot apron aptly aqua arise armband armful "
+    "armhole arming armless armoire armored armory armrest aroma arose "
+    "arousal array arrival arson ascend ascent ashamed ashen ashes ashy aside "
+    "askew asleep aspire aspirin astound astride astute atop atrium atrophy "
+    "attach attain attempt attest attic attire audible audibly audio autism "
+    "avatar avenge avenue avert aviator avid await awaken award awhile awning "
+    "awoke awry babble babied baboon backed backer backing backlit backlog "
+    "backup badass badland badly badness baffle bagel bagful baggage bagged "
+    "baggie bagging baggy bagpipe baked bakery baking balmy banish banjo "
+    "banked banker banking banshee banter barbed barbell barber barcode barge "
+    "barista barley barmaid barman barn barrack barrier bash basics basil "
+    "basin basis batboy batch bath baton bats battery batting bauble bazooka "
+    "blabber bladder blah blaming blank blazer blazing bleach bleep blemish "
+    "blend blimp bling blinked blinker blinks blip blitz bloated blob blog "
+    "blooper blot blubber bluff bluish blunt blurb blurred blurry blurt "
+    "boaster bobbed bobbing bobble bobcat bobsled bobtail bogged boggle bogus "
+    "bok bolster bolt bonanza bonded bonding boned boney bonfire bonnet "
+    "bonsai bony booted booth bootie booting bootleg boots boozy borax "
+    "borough botany botch both bottle bouncy bovine boxcar boxer boxing "
+    "boxlike boxy breach breath breeder breezy brewery brewing briar bribe "
+    "bride bridged brigade brim brink brisket briskly bristle brittle broaden "
+    "broadly broiler broker bronco brook brought browse brunch brunt brute "
+    "bubbly bucked bucket buckle budding buffed buffer buffing buffoon buggy "
+    "bulge bulgur bulldog bullion bullish bullpen bully bunch bungee bunion "
+    "bunkbed bunny bunt busboy bush busily busload bust cabana cabbie caboose "
+    "cache cackle cacti caddie caddy cadet cadmium cahoots calcium caliber "
+    "caloric calorie calzone cameo camper camping campus canary candied "
+    "candle cane canine canned canning cannot canola canon canopy canteen "
+    "capably cape capitol capped capsize capsule caption captive capture "
+    "caramel carat caravan carded cardiac caress caring carless carload "
+    "carnage carol carpool carport carried carrot cartel carton cartoon carve "
+    "carving carwash cascade casing casket catcall catcher catchy caterer "
+    "catfish catlike catnap catnip catsup cattail catty catwalk caucus causal "
+    "causing cavalry caviar cavity celtic certify chafe chain chalice chamber "
+    "chance channel chant chapped chaps charger chariot charity charm charred "
+    "charter chasing chaste chatter chatty cheddar cheek cheer cheesy chemist "
+    "chemo cherub chess chevron chevy chewer chewing chewy chili chill chimp "
+    "chip chirpy chive choking chomp chooser choosy chop chosen chowder "
+    "chrome chubby chuck chug chummy chump chute cider cinch cinema circus "
+    "citable citadel citric citrus civic clad clammy clamor clamp clang "
+    "clapped clapper clarity clash clasp class clatter clause clear cleat "
+    "cleaver cleft clench clicker climate cling clique cloak clobber clone "
+    "cloning closure clothes clover clubbed clumsy clunky clutter coastal "
+    "coaster coat cobalt cobbler cobweb cocoa cod coerce coexist coke cola "
+    "cold collage collar collide collie colony colt coma comfy coming comma "
+    "commend comment commode commute compare compel compile comply compost "
+    "comrade concave conceal concept conch concise concur condone conduit "
+    "cone confess conform conical conjure consent console consult contact "
+    "contend contest context contort contour convene convent cope copied "
+    "copier copilot coping copious cork corncob cornea corned corner corny "
+    "coroner corral corrode corsage corset cortex cosmic cosmos cottage cough "
+    "could county courier coveted coyness cozily cozy crafter crafty cramp "
+    "cranial cranium crank crate crave craving crayon crazed crazily creamed "
+    "creamer crease create creed creme creole crepe crept crested crevice "
+    "crewman crib cried crier crimp crimson cringe crinkle crinkly crisped "
+    "crisply crispy critter croak crock crook croon crouton crowbar crown "
+    "crudely cruelly cruelty crumb crummy crumpet crunchy crushed crusher "
+    "crust crux crying cryptic cubical cubicle cuddle cuddly culprit cupcake "
+    "cupid cupped cupping curable curator curdle cure curfew curing curled "
+    "curler curling curly curry curse cursive cursor curtly curtsy curvy "
+    "cushy cusp cussed custard custody customs cut cyclic cycling cyclist "
+    "cymbal dab dagger daily dainty dairy daisy dancing dander dandy dangle "
+    "dares darkish darling darn dart data dating dawdler daybed daycare "
+    "daylong dayroom daytime dazzler deacon dealer dealing dealt dean debit "
+    "debrief debtor debug debunk decaf decal decay deceit decency decent "
+    "decibel decimal deck decode decoy decree deduce deduct deed deem deepen "
+    "deeply deface defame default defeat defiant defile deflate defog defraud "
+    "defrost deftly defuse deity delete delouse delta deluge deluxe demote "
+    "denim denote dense density dental denture depict deplete deploy deport "
+    "depose depress deprive derail derby derived deserve desktop despise "
+    "despite destiny detest detract deuce devalue deviant deviate devious "
+    "devotee diaper dicing dictate dig dill dilute dime dimly dimmed dimmer "
+    "dimness dimple diner dingbat dinghy dingo dingy dining diocese dioxide "
+    "diploma dipped dipper dipping disarm disband discard discern discuss "
+    "disdain disjoin disk dislike dismay disobey disown dispose dispute "
+    "disrupt distant distill distort ditch ditto ditzy divided diving doable "
+    "docile dock dodge dodgy doily doing dole dollar dollop dolly donated "
+    "donator donut doodle doorman doormat doorway doozy dork dorsal dosage "
+    "dotted douche down dowry doze drab drained drainer drank drapery dreaded "
+    "dreamt dreamy dreary drench drew dribble dried drier driller drippy "
+    "driven driver driving drizzle drizzly drone drool droop dropbox droplet "
+    "dropout dropper drove drown drudge dubbed duchess ducking ducky duct "
+    "dude duffel dugout duh duke duller duly dumping duo dupe duplex durable "
+    "durably duress dutiful duvet dweeb dwelled dweller dwindle dynasty each "
+    "earache eardrum earflap earful earlobe earmark earmuff earring earshot "
+    "earthen earthly earthy earwig easeful easel easiest easing easter "
+    "eatable eaten eatery eating eats ebay ebony ebook ecard eclair eclipse "
+    "edging edgy edition editor eel effects egging eggnog egotism eject "
+    "elastic elated elderly eldest elevate eleven elf elitism elixir elk "
+    "ellipse elope elude elusive elves email embargo embassy ember emblaze "
+    "emblem emboss emcee emerald emit emote empathy emperor emptier emu "
+    "enamel enclose encode encore encrust encrypt ended ending endnote "
+    "engaged engorge engross engulf enjoyer enrage enslave ensnare entail "
+    "entitle entity entomb entrap entree entrust entwine envious envoy envy "
+    "enzyme epic equate equator equinox equity erased eraser erasure errand "
+    "errant erratic eskimo esquire etching ethanol ether evacuee evade "
+    "evasion evasive even evict evident exalted exclaim exert exes exhale "
+    "exhume exodus expanse expel expend expert explode exploit explore extent "
+    "extinct extras extrude fable faceted facial facing faction factoid "
+    "factor factual fading failing falsify famine fanatic fancied fanfare "
+    "fang fanning fascism faster fasting faucet favored fax feast fedora "
+    "feeble feisty feline femur fencing fender ferment ferret ferris ferry "
+    "fervor fester festive fetal fiddle fidgety fifteen fifth fifty figment "
+    "filing filled filler filling filth finale finally finance finch finer "
+    "finicky finite finless finlike five flaccid flagman flail flakily flaky "
+    "flanked flap flaring flashy flask flatbed flatly flatten flattop fled "
+    "fleshed fleshy flick flier flinch fling flint flirt flop floral florist "
+    "floss flyable flyaway flyer flying flyover foe folic folk fondly fondue "
+    "font fool footage footer footing footman footpad footsie founder foyer "
+    "frail framing frantic frayed fraying frays freebee freebie freedom "
+    "freeing freely freeway freight french frenzy fretful fretted friday "
+    "fridge fried frill frisbee frisk fritter frolic from frosted frosty "
+    "froth frying gab gaffe gag gaining gains gala galley gallon gallows "
+    "galore gaming gamma gander gangly gangway gargle garland garnet garnish "
+    "garter gating gauging gauze gave gawk gazing gear gecko geek geiger gem "
+    "gender generic gentile gently gents geology gerbil gestate getaway "
+    "getting getup giblet giddily giddy giggly gigolo gilled gills gimmick "
+    "girdle given giver giving gizmo gizzard glacial glacier glade gladly "
+    "glamour glaring glazing gleeful glider gliding glimmer glisten glitch "
+    "glitter glitzy gloater gloomy glorify gloss glowing glucose gluten "
+    "glutton gnarly gnat goal goes goggles going golf goliath gonad gondola "
+    "gone gong gooey goofy google goon gopher gore gorged gory gosling gothic "
+    "gotten gout graded grader grading grafted grandly grandma grandpa "
+    "granite granny granola graph grapple grasp gratify grating gravel graves "
+    "gravy gray grazing greedy greeter grew grill grimace grime grimy grinch "
+    "grip gristle groggy groin groom groove groovy grope ground grouped grout "
+    "grove grower growing growl grub grudge gruffly grumble grumbly grunge "
+    "guiding guise gulf gully gulp gumball gumdrop gumming gummy gurgle guru "
+    "gush gusto gusty gutless guts gutter guy guzzler habitat hacked hacker "
+    "hacking hacksaw had haggler haiku halogen halt halved halves hamlet "
+    "hammock hamper handbag handed handful handgun handled handler handoff "
+    "handsaw handset hangout hangup hankie hanky happier happily hardhat "
+    "hardly hardy harmful harmony harness harpist hash hassle haste hastily "
+    "hasty hatbox hatchet hate hatless hatred haunt hazily hazing hazy headed "
+    "header heading headset headway heap heat heave heavily heaving hedge "
+    "hedging hefty helium helper helpful helping hemlock hence henna herald "
+    "herbal herbs hermit heroics heroism herring herself hertz hexagon hubcap "
+    "huddle huff hug hula hulk hull humbly humid humming hummus humped humvee "
+    "hunger hunk hunter hunting hurled hurler hurling hurray hurried hush "
+    "husked hut hydrant hyphen iciness icing icky icy ideally idiocy idiom "
+    "idly igloo iguana imaging immerse impale impart impeach impish implant "
+    "implode imply impound imprint impure iodine iodize ion ipad iphone ipod "
+    "irate irk islamic isotope issuing italics itunes ivy jab jackal jackpot "
+    "jailer jam janitor january jargon jarring jasmine jaunt java jawed "
+    "jawless jawline jaws jaybird jeep jellied jersey jester jet jiffy jigsaw "
+    "jimmy jingle jinx jitters jittery jockey jogger jogging john joining "
+    "jolly jolt jot jovial joyous joyride judo juggle jugular juicy jujitsu "
+    "jukebox july jumble jumbo june juniper junkie junkman jurist juror jury "
+    "justice justify justly kabob karaoke karate karma kebab keenly keg kelp "
+    "kennel kept kettle kiln kilt kimono kindle kindly kindred kinetic "
+    "kinfolk king kinship kinsman kisser kissing kitty kleenex knelt knoll "
+    "koala kooky kosher krypton kudos kung labored laborer ladies ladle "
+    "ladybug lagged lagging lagoon lair lance landed landing lanky lantern "
+    "lapdog lapel lapped lapping lard lark lash lasso last latch late lather "
+    "latrine latter launch launder laurel lavish lazily legacy legged legible "
+    "legibly lego legroom legume legwork lent leotard lesser letdown lettuce "
+    "levers liable licking lid lifter lifting liftoff likely liking lilac "
+    "lilly lily limeade limes limping line lingo lining linked linseed lint "
+    "lip liquefy liqueur lisp litmus litter livable lived lively liver "
+    "lividly living lucid luckily lugged lullaby lumping lumpish lunacy lung "
+    "lurch lure lurk lushly luster lustily lusty lying macaw mace magenta "
+    "maggot magical magma magnify maimed majesty maker making malt mama "
+    "mammary manager manatee manger mangle mangy manhole manhood manhunt "
+    "manila mankind manlike manly manmade manned mannish manor mantis mantra "
+    "many map marbled marbles mardi marina marital marlin maroon married "
+    "marrow marry marshy marxism mascot mashed mashing masses massive mastiff "
+    "matador matcher mating matron matted mauve maybe mayday moaner moaning "
+    "mobster mocha mocker mockup modular module moisten molar mold mollusk "
+    "monday mongrel monsoon monthly moocher moody mooing mooned moonlit mop "
+    "morale morally morse mortify mosaic mossy most motive motto mounted "
+    "mourner mousy mouth movable moving mower mowing muck mud mug mulch "
+    "mulled mullets mumble mumbo mummify mummy mumps mundane muppet mural "
+    "murky mushily mushy musket musky mustang mustard muster musty mutable "
+    "mutate mute mutiny mutt muzzle myspace mystify nacho nag nail naming "
+    "nanny nape napped napping nappy nastily native natural navy nearby "
+    "nearest nearly neatly nebula nectar negate nemeses nemesis neon nerd "
+    "nervous nervy neuron neuter neutron nibble niece nifty nimble nimbly "
+    "ninja ninth nuclei nucleus nugget nullify numbing numbly numeral numeric "
+    "nursery nursing nurture nutcase nutlike nutmeg nutty nuzzle nylon oaf "
+    "oasis oat obliged oblong oboe obtuse occupy ocelot octagon octane "
+    "octopus ogle oink omega omen ominous onboard ongoing onset onshore "
+    "onstage onto onward onyx oops ooze oozy opacity opal operate opium "
+    "opossum opt osmosis otter ouch ought ounce outage outback outbid outcast "
+    "outcome outfit outgrow outing outlast outlet outline outlook outmost "
+    "outpost outpour outrage outrank outsell outward outwit ovary overact "
+    "overall overbid overdue overfed overlap overlay overpay overrun overtly "
+    "overuse owl oxford oxidant oxidize paced pacific pacify padded padding "
+    "padlock pagan pager paging pajamas paltry pampers panama pancake pang "
+    "panning pantry pants papaya paprika papyrus paradox parcel parched "
+    "pardon parish parka parking parkway parlor parole parsley parsnip "
+    "partake parted parting partly partner passage passing passion passive "
+    "pasta pasted pastel pastime pastor pasture pasty patchy patio patriot "
+    "pauper paver paving pawing payable payback payday payee payer paying "
+    "payroll pebble pebbly pecan pectin pellet pelt pelvis pendant pending "
+    "pennant penny penpal pension pep percent perch perfume perish perjury "
+    "perky perm pesky peso pester petal petite petri petted petty petunia "
+    "phantom phobia phoenix phoney phonics phony placard placate plank "
+    "planner plant plasma plaster plated plating platter player playful "
+    "playing playoff"
+).split())
+
+MEMORABLE_WORDS_ADJ = MEMORABLE_WORDS
+MEMORABLE_WORDS_NOUN = MEMORABLE_WORDS
+WORDLIST_ADJECTIVES = MEMORABLE_WORDS
+WORDLIST_NOUNS = MEMORABLE_WORDS
+PASSCODE_WORDS = MEMORABLE_WORDS
+
+def generate_passcode() -> str:
+    """
+    Generate a clean, human-friendly 8-10+ character memorable passcode on initial launch.
+    Format: word-word-NN (e.g. star-falcon-42, bold-tiger-79).
+    Ambiguity exclusion: Avoids ambiguous glyphs (0, O, 1, l, I). Suffix digits strictly chosen from [2-9].
+    CSPRNG: secrets.choice().
+    Entropy: log2(4096 * 4096 * 8 * 8) = 30.0 bits of entropy.
+    """
+    w1 = secrets.choice(MEMORABLE_WORDS)
+    w2 = secrets.choice(MEMORABLE_WORDS)
+    d1 = secrets.choice("23456789")
+    d2 = secrets.choice("23456789")
+    return f"{w1}-{w2}-{d1}{d2}"
+
+
 
 class SecurityConfig:
     """
@@ -53,6 +466,7 @@ class SecurityConfig:
         self.access_key: str = ""
         self.password_hash: str = ""
         self.raw_password: str = ""
+        self.is_custom_passcode: bool = False
         self.trust_proxy_headers: bool = True
         self.allow_full_drive_remote: bool = False
         self.lock = threading.Lock()
@@ -91,32 +505,62 @@ class SecurityConfig:
                 env_vars["TURBOSHARE_ACCESS_KEY"] = self.access_key
                 dirty = True
 
-            # 3. Master Passphrase Hash (PBKDF2-HMAC-SHA256, 600,000 iterations)
-            if "TURBOSHARE_PASSWORD_HASH" in env_vars and env_vars["TURBOSHARE_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
-                self.password_hash = env_vars["TURBOSHARE_PASSWORD_HASH"]
-            elif "APP_PASSWORD" in env_vars and env_vars["APP_PASSWORD"]:
+            # 3. Master Passphrase & Hash (PBKDF2-HMAC-SHA256, 600,000 iterations)
+            if "APP_PASSWORD" in env_vars and env_vars["APP_PASSWORD"]:
                 # Automatic secure migration from legacy plaintext APP_PASSWORD
                 raw_pwd = env_vars["APP_PASSWORD"]
                 self.raw_password = raw_pwd
                 self.password_hash = self.hash_password(raw_pwd)
+                self.is_custom_passcode = True
+                env_vars["TURBOSHARE_PASSCODE"] = raw_pwd
                 env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
+                env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "true"
                 del env_vars["APP_PASSWORD"]
                 dirty = True
-                print("[AUTH NOTICE] Migrated plaintext APP_PASSWORD to salted PBKDF2-HMAC-SHA256 hash in .env")
+                print("[AUTH NOTICE] Migrated plaintext APP_PASSWORD to salted PBKDF2-HMAC-SHA256 hash and passcode in .env")
+            elif "TURBOSHARE_PASSCODE" in env_vars and env_vars["TURBOSHARE_PASSCODE"]:
+                raw_pwd = env_vars["TURBOSHARE_PASSCODE"]
+                self.raw_password = raw_pwd
+                if "TURBOSHARE_IS_CUSTOM_PASSCODE" in env_vars:
+                    self.is_custom_passcode = env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
+
+                if "TURBOSHARE_PASSWORD_HASH" in env_vars and env_vars["TURBOSHARE_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
+                    self.password_hash = env_vars["TURBOSHARE_PASSWORD_HASH"]
+                    if not self.verify_password(raw_pwd):
+                        # User manually updated TURBOSHARE_PASSCODE in .env! Re-hash and synchronize
+                        self.password_hash = self.hash_password(raw_pwd)
+                        self.is_custom_passcode = True
+                        env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
+                        env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "true"
+                        dirty = True
+                else:
+                    # Passcode present without valid hash, derive and store hash
+                    self.password_hash = self.hash_password(raw_pwd)
+                    env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
+                    dirty = True
+            elif "TURBOSHARE_PASSWORD_HASH" in env_vars and env_vars["TURBOSHARE_PASSWORD_HASH"].startswith("pbkdf2_sha256$"):
+                # Hash-only mode (backward compatibility / hardened deployment)
+                self.password_hash = env_vars["TURBOSHARE_PASSWORD_HASH"]
+                self.raw_password = ""
+                if "TURBOSHARE_IS_CUSTOM_PASSCODE" in env_vars:
+                    self.is_custom_passcode = env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"].lower() in ("1", "true", "yes")
             else:
-                # Auto-generate secure 16-character alphanumeric passphrase
-                chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-                generated_pwd = "".join(secrets.choice(chars) for _ in range(16))
+                # Auto-generate memorable passcode in word-word-NN format
+                generated_pwd = generate_passcode()
                 self.raw_password = generated_pwd
                 self.password_hash = self.hash_password(generated_pwd)
+                self.is_custom_passcode = False
+                env_vars["TURBOSHARE_PASSCODE"] = generated_pwd
                 env_vars["TURBOSHARE_PASSWORD_HASH"] = self.password_hash
+                env_vars["TURBOSHARE_IS_CUSTOM_PASSCODE"] = "false"
                 dirty = True
                 print("\n" + "=" * 68)
-                print("  [SECURITY NOTICE] AUTO-GENERATED MASTER APP PASSWORD:")
+                print("  [SECURITY NOTICE] AUTO-GENERATED MEMORABLE MASTER APP PASSCODE:")
                 print(f"  >>>  {generated_pwd}  <<<")
                 print("  Bookmark Access Key:")
                 print(f"  >>>  {self.access_key}  <<<")
-                print("  Saved salted PBKDF2 hash to .env. Keep this confidential!")
+                print("  Saved passcode and salted PBKDF2 hash to .env. Keep this confidential!")
+                print("  Tip: We recommend setting your own personal passcode, though your auto-generated code is active and secure.")
                 print("=" * 68 + "\n")
 
             # 4. Optional Security Flags
@@ -180,22 +624,22 @@ def parse_device_info(user_agent: str) -> str:
     """Parse user-agent string into human-friendly device and browser representation."""
     ua = (user_agent or "").lower()
     if not ua:
-        return "🌐 Browser / Web Client"
+        return "Browser / Web Client"
 
     # OS / Hardware Platform
     os_name = "Desktop"
     if "iphone" in ua:
-        os_name = "📱 Apple iPhone"
+        os_name = "Apple iPhone"
     elif "ipad" in ua:
-        os_name = "📱 Apple iPad"
+        os_name = "Apple iPad"
     elif "android" in ua:
-        os_name = "📱 Android Phone"
+        os_name = "Android Phone"
     elif "windows nt 10" in ua or "windows nt 11" in ua or "windows" in ua:
-        os_name = "💻 Windows PC"
+        os_name = "Windows PC"
     elif "macintosh" in ua or "mac os" in ua:
-        os_name = "💻 Apple Mac"
+        os_name = "Apple Mac"
     elif "linux" in ua:
-        os_name = "💻 Linux PC"
+        os_name = "Linux PC"
 
     # Browser Engine / Client
     browser = "Browser"
@@ -552,6 +996,7 @@ def change_master_password(new_password: str, revoke_all_sessions: bool = True) 
     new_hash = hash_password(cleaned)
     GLOBAL_SECURITY_CONFIG.password_hash = new_hash
     GLOBAL_SECURITY_CONFIG.raw_password = cleaned
+    GLOBAL_SECURITY_CONFIG.is_custom_passcode = True
 
     env_path = GLOBAL_SECURITY_CONFIG.env_path
     lines = []
@@ -564,17 +1009,29 @@ def change_master_password(new_password: str, revoke_all_sessions: bool = True) 
 
     new_lines = []
     hash_written = False
+    passcode_written = False
+    custom_written = False
     for line in lines:
         if line.strip().startswith("TURBOSHARE_PASSWORD_HASH="):
             new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
             hash_written = True
+        elif line.strip().startswith("TURBOSHARE_PASSCODE="):
+            new_lines.append(f"TURBOSHARE_PASSCODE={cleaned}\n")
+            passcode_written = True
+        elif line.strip().startswith("TURBOSHARE_IS_CUSTOM_PASSCODE="):
+            new_lines.append("TURBOSHARE_IS_CUSTOM_PASSCODE=true\n")
+            custom_written = True
         elif line.strip().startswith("APP_PASSWORD="):
             continue
         else:
             new_lines.append(line)
 
+    if not passcode_written:
+        new_lines.append(f"TURBOSHARE_PASSCODE={cleaned}\n")
     if not hash_written:
         new_lines.append(f"TURBOSHARE_PASSWORD_HASH={new_hash}\n")
+    if not custom_written:
+        new_lines.append("TURBOSHARE_IS_CUSTOM_PASSCODE=true\n")
 
     try:
         with open(env_path, "w", encoding="utf-8") as f:
@@ -614,10 +1071,13 @@ def get_client_ip(handler: Any) -> str:
     1. Direct connection from non-loopback IP -> Strictly ignore proxy headers (prevents LAN spoofing).
     2. Connection from loopback (127.0.0.1 / ::1) -> Parse CF-Connecting-IP or X-Forwarded-For if trusted.
     """
-    if not handler or not hasattr(handler, "client_address"):
-        return "127.0.0.1"
+    if not handler or not hasattr(handler, "client_address") or not handler.client_address:
+        return "0.0.0.0"
 
-    socket_ip = str(handler.client_address[0])
+    try:
+        socket_ip = str(handler.client_address[0]).strip()
+    except (IndexError, TypeError, Exception):
+        return "0.0.0.0"
     is_loopback = socket_ip in ("127.0.0.1", "::1", "localhost") or socket_ip.startswith("127.")
 
     if not is_loopback or not GLOBAL_SECURITY_CONFIG.trust_proxy_headers:
@@ -716,9 +1176,51 @@ def is_request_https(handler: Any) -> bool:
     return False
 
 
+TUNNEL_HEADERS = frozenset({"cf-connecting-ip", "x-forwarded-for", "x-real-ip", "forwarded", "true-client-ip"})
+
+
+def is_physical_localhost(handler: Any) -> bool:
+    """
+    Verify whether request originated physically from loopback (127.0.0.1, ::1)
+    and strictly without reverse-proxy tunnel headers (Forwarded, CF-Connecting-IP, X-Forwarded-For, X-Real-IP, True-Client-IP).
+    Fail-closed: Returns False if handler or client_address is missing/invalid or if tunnel headers are present.
+    """
+    if not handler or not getattr(handler, "client_address", None):
+        return False
+
+    try:
+        peer = str(handler.client_address[0]).strip()
+    except (IndexError, TypeError, Exception):
+        return False
+
+    is_loopback = (
+        peer in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+        or peer.startswith("127.")
+        or peer.startswith("::ffff:127.")
+    )
+    if not is_loopback:
+        return False
+
+    headers = getattr(handler, "headers", None)
+    if headers:
+        # Case-insensitive check across dictionary/HTTPMessage items
+        if hasattr(headers, "items"):
+            for k, v in headers.items():
+                if str(k).strip().lower() in TUNNEL_HEADERS and bool(str(v).strip()):
+                    return False
+        # Direct lookup for case-insensitive structures (HTTPMessage)
+        for h in ("CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP", "Forwarded", "True-Client-IP"):
+            val = getattr(headers, "get", lambda x, d=None: None)(h)
+            if val and bool(str(val).strip()):
+                return False
+
+    return True
+
+
 def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_data: Optional[Dict[str, Any]] = None) -> bool:
     """
-    Handle /api/auth, /api/login, /api/logout, and /api/check_auth routes.
+    Handle /api/auth, /api/login, /api/logout, /api/check_auth, /api/sessions,
+    /api/revoke_session, /api/change_password, and /api/host_security_info routes.
     Returns True if request was handled, False otherwise.
     """
     client_ip = get_client_ip(handler)
@@ -866,8 +1368,7 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
 
     # 5. List Sessions (/api/sessions) - Strictly Host Only
     if path == "/api/sessions":
-        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
-        if not is_host:
+        if not is_physical_localhost(handler):
             payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
             handler.send_response(403)
             handler.send_header("Content-Type", "application/json")
@@ -887,8 +1388,7 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
 
     # 6. Revoke Remote Session (/api/revoke_session) - Strictly Host Only
     if path == "/api/revoke_session":
-        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
-        if not is_host:
+        if not is_physical_localhost(handler):
             payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
             handler.send_response(403)
             handler.send_header("Content-Type", "application/json")
@@ -918,8 +1418,7 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
 
     # 7. Change Master Password (/api/change_password) - Strictly Host Only
     if path == "/api/change_password":
-        is_host = getattr(handler, "is_physical_localhost", lambda: True)()
-        if not is_host:
+        if not is_physical_localhost(handler):
             payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
             handler.send_response(403)
             handler.send_header("Content-Type", "application/json")
@@ -934,6 +1433,35 @@ def handle_auth_routes(handler: Any, path: str, qs: Dict[str, List[str]], body_d
         status = 200 if ok else 400
         payload = json.dumps({"success": ok, "message": msg}).encode("utf-8")
         handler.send_response(status)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    # 8. Host Security Info (/api/host_security_info) - Strictly Host Only
+    if path == "/api/host_security_info":
+        if not is_physical_localhost(handler):
+            payload = json.dumps({"success": False, "error": "forbidden", "message": "Host only."}).encode("utf-8")
+            handler.send_response(403)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return True
+
+        passcode = get_master_password()
+        is_custom = getattr(GLOBAL_SECURITY_CONFIG, "is_custom_passcode", False)
+        tip = "Tip: We recommend setting your own personal passcode, though your auto-generated code is active and secure."
+        payload = json.dumps({
+            "success": True,
+            "passcode": passcode,
+            "is_custom": is_custom,
+            "iterations": DEFAULT_ITERATIONS,
+            "access_key": get_access_key(),
+            "tip": tip
+        }).encode("utf-8")
+        handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(payload)))
         handler.end_headers()

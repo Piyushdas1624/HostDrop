@@ -3450,6 +3450,29 @@ body {
     </div>
     <div class="modal-body" style="padding: 16px 20px; gap: 18px; overflow-y: auto; flex: 1;">
       
+      <!-- Section 0: Active Master Passcode & Security Tip -->
+      <div class="sec-card-box" id="activePasscodeCard">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
+          <div>
+            <div style="font-size: 14px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+              <span>Active Master Passcode</span>
+              <span id="passcodeTypeBadge" style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(56,189,248,0.15); color: #38bdf8; font-weight: 500;">PBKDF2-HMAC-SHA256</span>
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary);">Used by remote devices to unlock TurboShare</div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <code id="hostPasscodeDisplay" style="font-family: var(--font-mono); font-size: 14px; font-weight: 700; color: #38bdf8; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); padding: 4px 10px; border-radius: 6px; letter-spacing: 0.5px;">Loading...</code>
+            <button class="btn btn-secondary btn-sm" id="btnCopyPasscode" onclick="copyHostPasscode()" title="Copy Passcode">
+              <svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span id="btnCopyPasscodeText">Copy</span>
+            </button>
+          </div>
+        </div>
+        <div id="hostPasscodeTip" style="font-size: 12px; color: var(--text-tertiary); background: rgba(255,255,255,0.03); border-left: 3px solid #38bdf8; padding: 6px 10px; border-radius: 0 4px 4px 0; margin-top: 6px;">
+          Tip: We recommend setting your own personal passcode, though your auto-generated code is active and secure.
+        </div>
+      </div>
+
       <!-- Section 1: Active Remote Sessions -->
       <div class="sec-card-box">
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
@@ -3657,8 +3680,9 @@ body {
           <code class="mono" id="qrHostUrl" style="font-size: 12px; color: var(--text-primary);">http://127.0.0.1:__PORT__</code>
           <button class="btn btn-ghost btn-sm" style="font-size: 11px; padding: 4px 10px;" onclick="copyAddress(document.getElementById('qrHostUrl').textContent, this)">Copy</button>
         </div>
-        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.4;">
-          🔒 <strong>Host Device Only:</strong> This address works exclusively in a browser on this host computer. It <em>cannot</em> be accessed by phones or other devices on your network. (No QR code generated).
+        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px; line-height: 1.4; display: flex; align-items: flex-start; gap: 6px;">
+          <svg class="icon" style="width: 14px; height: 14px; color: var(--text-tertiary); flex-shrink: 0; margin-top: 1px;" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span><strong>Host Device Only:</strong> This address works exclusively in a browser on this host computer. It <em>cannot</em> be accessed by phones or other devices on your network. (No QR code generated).</span>
         </div>
       </div>
     </div>
@@ -5338,8 +5362,64 @@ async function logoutAuth() {
 /* ═══════════════════════════════════════════════════════════════════════════════
    HOST SECURITY & REMOTE SESSIONS CENTER (Physical Host Only)
    ═══════════════════════════════════════════════════════════════════════════════ */
+async function loadHostSecurityInfo() {
+  const display = document.getElementById('hostPasscodeDisplay');
+  const tip = document.getElementById('hostPasscodeTip');
+  const badge = document.getElementById('passcodeTypeBadge');
+  if (!display) return;
+
+  try {
+    const res = await fetch('/api/host_security_info');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success) {
+        display.innerText = data.passcode || '[Stored hashed in .env]';
+        display.dataset.passcode = data.passcode || '';
+        if (tip && data.tip) {
+          tip.innerText = data.tip;
+        }
+        if (badge) {
+          badge.innerText = data.is_custom ? 'Personal Passcode' : 'Auto-Generated';
+          badge.style.background = data.is_custom ? 'rgba(74, 222, 128, 0.15)' : 'rgba(56, 189, 248, 0.15)';
+          badge.style.color = data.is_custom ? '#4ade80' : '#38bdf8';
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to load host security info:', e);
+  }
+}
+
+function copyHostPasscode() {
+  const display = document.getElementById('hostPasscodeDisplay');
+  const btnText = document.getElementById('btnCopyPasscodeText');
+  const code = (display && (display.dataset.passcode || display.innerText)) || '';
+  if (!code || code.includes('Loading') || code.includes('Stored hashed')) return;
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code).then(() => {
+      if (btnText) {
+        btnText.innerText = 'Copied!';
+        setTimeout(() => { btnText.innerText = 'Copy'; }, 2000);
+      }
+    });
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = code;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (btnText) {
+      btnText.innerText = 'Copied!';
+      setTimeout(() => { btnText.innerText = 'Copy'; }, 2000);
+    }
+  }
+}
+
 function openSecurityModal() {
   openModal('securityModal');
+  loadHostSecurityInfo();
   refreshSessionsList();
 }
 
@@ -5470,6 +5550,7 @@ async function handleHostPasswordChange(e) {
     if (data.success) {
       showToast(data.message || 'Passcode updated successfully.', 'success');
       input.value = '';
+      loadHostSecurityInfo();
       refreshSessionsList();
     } else {
       showToast(data.message || 'Failed to update passcode.', 'error');
@@ -5966,10 +6047,38 @@ class TurboShareHandler(BaseHTTPRequestHandler):
 
     def is_physical_localhost(self) -> bool:
         """Verify whether request originated physically from localhost (not via tunnel)."""
-        peer = self.client_address[0]
-        is_loopback = peer in ("127.0.0.1", "::1", "localhost") or peer.startswith("127.")
-        has_tunnel_header = bool(self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For") or self.headers.get("X-Real-IP"))
-        return is_loopback and not has_tunnel_header
+        if auth and hasattr(auth, "is_physical_localhost"):
+            return auth.is_physical_localhost(self)
+
+        # Fallback if auth module is unavailable (matching fail-closed logic)
+        if not hasattr(self, "client_address") or not self.client_address:
+            return False
+        try:
+            peer = str(self.client_address[0]).strip()
+        except (IndexError, TypeError, Exception):
+            return False
+
+        is_loopback = (
+            peer in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+            or peer.startswith("127.")
+            or peer.startswith("::ffff:127.")
+        )
+        if not is_loopback:
+            return False
+
+        headers = getattr(self, "headers", None)
+        if headers:
+            tunnel_headers = frozenset({"cf-connecting-ip", "x-forwarded-for", "x-real-ip", "forwarded", "true-client-ip"})
+            if hasattr(headers, "items"):
+                for k, v in headers.items():
+                    if str(k).strip().lower() in tunnel_headers and bool(str(v).strip()):
+                        return False
+            for h in ("CF-Connecting-IP", "X-Forwarded-For", "X-Real-IP", "Forwarded", "True-Client-IP"):
+                val = getattr(headers, "get", lambda x, d=None: None)(h)
+                if val and bool(str(val).strip()):
+                    return False
+
+        return True
 
     def do_GET(self):
         global UPLOAD_DIR, HOST_SHARE
@@ -5978,7 +6087,7 @@ class TurboShareHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(parsed.query)
 
         # ── Intercept Authentication & Session Management Routes ──
-        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth", "/api/sessions", "/api/revoke_session", "/api/change_password"):
+        if auth and path in ("/api/auth", "/api/login", "/api/logout", "/api/check_auth", "/api/sessions", "/api/revoke_session", "/api/change_password", "/api/host_security_info"):
             if auth.handle_auth_routes(self, path, qs):
                 return
 
@@ -6620,6 +6729,8 @@ def main():
         print(f"  Master App Passcode        : {auth.get_master_password()}")
         print(f"  Persistent Bookmark Key    : {auth.get_access_key()}")
         print(f"  Direct Localhost Access    : http://127.0.0.1:{SERVER_PORT}")
+        print(f"  Security Recommendation    : Tip: We recommend setting your own personal passcode,")
+        print(f"                               though your auto-generated code is active and secure.")
     print("=" * 68)
 
     if qrcode and primary:
