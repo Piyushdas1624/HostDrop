@@ -12,8 +12,6 @@ temp_script.js
 live_rendered_script.js
 capture_*.py
 skills-lock.json
-tests/
-test_*.py
 ORIGINAL_REQUEST.md
 README_*.md
 readme_*.md
