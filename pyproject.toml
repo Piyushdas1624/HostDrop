@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hostdrop"
+version = "1.0.0"
+description = "Universal cross-device high-speed file transfer hub"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "Piyush Das", email = "piyushdas1624@users.noreply.github.com" }
+]
+keywords = ["file-transfer", "lan-sharing", "cross-platform", "tunnel", "http-server"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: File Sharing",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+dependencies = []
+
+[project.optional-dependencies]
+qrcode = ["qrcode[pil]"]
+psutil = ["psutil"]
+all = ["qrcode[pil]", "psutil"]
+
+[project.urls]
+Homepage = "https://github.com/Piyushdas1624/hostdrop"
+Repository = "https://github.com/Piyushdas1624/hostdrop.git"
+Issues = "https://github.com/Piyushdas1624/hostdrop/issues"
+
+[project.scripts]
+hostdrop = "hostdrop:main"
+
+[tool.setuptools]
+py-modules = ["hostdrop", "auth"]

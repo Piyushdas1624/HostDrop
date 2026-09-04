@@ -26,6 +26,43 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+
+def is_termux() -> bool:
+    """Detect if HostDrop is running inside an Android Termux environment."""
+    return bool(
+        os.environ.get("TERMUX_VERSION")
+        or os.path.exists("/data/data/com.termux")
+        or (os.environ.get("PREFIX") and "com.termux" in os.environ.get("PREFIX", ""))
+        or hasattr(sys, "getandroidapilevel")
+    )
+
+
+def get_windows_volume_label(drive_path: str) -> str:
+    """Retrieve Windows filesystem volume label using GetVolumeInformationW."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        fs_buf = ctypes.create_unicode_buffer(1024)
+        success = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(drive_path),
+            buf,
+            ctypes.sizeof(buf),
+            None,
+            None,
+            None,
+            fs_buf,
+            ctypes.sizeof(fs_buf)
+        )
+        if success:
+            val = buf.value.strip()
+            if val:
+                return val
+    except Exception:
+        pass
+    return ""
+
 # ── Optional Helper Libraries ───────────────────────────────────────────────────
 try:
     import psutil
@@ -91,13 +128,41 @@ class TunnelManager:
         p = shutil.which("cloudflared")
         if p:
             return p
-        candidates = [
+        candidates = []
+        # Windows candidate locations (WinGet, Scoop, Program Files, local .bin)
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "Microsoft", "WinGet", "Links", "cloudflared.exe"))
+        user_profile = os.environ.get("USERPROFILE", os.path.expanduser("~"))
+        if user_profile:
+            candidates.append(os.path.join(user_profile, "scoop", "shims", "cloudflared.exe"))
+        candidates.extend([
             r"C:\Program Files (x86)\cloudflared\cloudflared.exe",
             r"C:\Program Files\cloudflared\cloudflared.exe",
             os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bin", "cloudflared.exe")
-        ]
+        ])
+        # Linux & Unix candidate locations
+        candidates.extend([
+            "/usr/local/bin/cloudflared",
+            "/usr/bin/cloudflared",
+            "/bin/cloudflared",
+            os.path.expanduser("~/.local/bin/cloudflared")
+        ])
+        # macOS candidate locations (Homebrew on Apple Silicon & Intel)
+        candidates.extend([
+            "/opt/homebrew/bin/cloudflared",
+            "/usr/local/bin/cloudflared"
+        ])
+        # Android Termux candidate locations
+        termux_prefix = os.environ.get("PREFIX", "")
+        if termux_prefix:
+            candidates.append(os.path.join(termux_prefix, "bin", "cloudflared"))
+        candidates.extend([
+            "/data/data/com.termux/files/usr/bin/cloudflared",
+            "/data/data/com.termux/files/home/.local/bin/cloudflared"
+        ])
         for c in candidates:
-            if os.path.exists(c):
+            if c and os.path.isfile(c):
                 return c
         return None
 
@@ -155,8 +220,21 @@ class TunnelManager:
                     TUNNEL_PROC = None
 
         # Fallback to Pinggy SSH
-        if provider in ("auto", "pinggy") and shutil.which("ssh"):
-            cmd = ["ssh", "-p", "443", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30", "-R", f"0:localhost:{port}", "a.pinggy.io"]
+        ssh_bin = shutil.which("ssh")
+        if not ssh_bin:
+            for cand in [r"C:\Windows\System32\OpenSSH\ssh.exe", "/usr/bin/ssh", "/usr/local/bin/ssh"]:
+                if os.path.isfile(cand):
+                    ssh_bin = cand
+                    break
+        if provider in ("auto", "pinggy") and ssh_bin:
+            cmd = [
+                ssh_bin, "-p", "443", "-T",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ServerAliveInterval=30",
+                "-R", f"0:localhost:{port}",
+                "a.pinggy.io"
+            ]
             try:
                 TUNNEL_PROC = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                 pinggy_regex = re.compile(r"https://[a-zA-Z0-9-]+\.a?\.?pinggy\.link")
@@ -250,11 +328,11 @@ def get_network_interfaces():
                         
                         if "vethernet" in lo or "switch" in lo or "wsl" in lo or "hyper" in lo or "docker" in lo or "vmware" in lo:
                             kind, label, desc, pri = "virtual", "Virtual / WSL", "Internal Virtual Switch", 9
-                        elif "wi-fi" in lo or "wireless" in lo or "wlan" in lo:
+                        elif "wi-fi" in lo or "wireless" in lo or "wlan" in lo or (sys.platform == "darwin" and lo == "en0"):
                             kind, label, desc, pri = "wifi", "Wi-Fi Network", "Home/Office Wireless LAN", 1
-                        elif ip.startswith("192.168.137.") or "hotspot" in lo or "host" in lo:
+                        elif ip.startswith("192.168.137.") or "hotspot" in lo or "host" in lo or "ap0" in lo or "rndis" in lo or "tether" in lo:
                             kind, label, desc, pri = "hotspot", "Mobile Hotspot", "Tethered Hotspot Devices", 2
-                        elif "ethernet" in lo or "eth" in lo or "lan" in lo:
+                        elif "ethernet" in lo or "eth" in lo or "lan" in lo or lo.startswith("en"):
                             if ip.startswith("169.254."):
                                 kind, label, desc, pri = "ethernet-direct", "Direct Cable (P2P)", "High-Speed Direct Link (90-115 MB/s)", 3
                             else:
@@ -476,98 +554,160 @@ def safe_path(base_dir, rel):
 
 def get_host_drives():
     """
-    Enumerate all logical storage drives on the host PC with capacity and free space.
-    On Windows: queries C:\\, D:\\, etc. via kernel32 GetLogicalDrives.
-    On Unix/macOS: queries root (/), /Volumes, /media, /mnt, and user home.
+    Enumerate all logical storage drives on the host PC or mobile device with capacity and free space.
+    - Windows: queries C:\\, D:\\, etc. via GetLogicalDrives and GetVolumeInformationW.
+    - Android Termux: exposes internal storage (/sdcard), downloads, Termux home (~), OTG mounts, and root (/).
+    - Linux & macOS: queries root (/), user home (~), /Volumes, /media, /run/media, and /mnt.
     """
     drives = []
-    if sys.platform == "win32":
+
+    def make_entry(path, name, label, letter, is_system=False):
+        total = 0
+        used = 0
+        free = 0
+        percent = 0.0
+        free_gb = "?"
+        total_gb = "?"
+        used_gb = "?"
+        used_pct = 0
+        try:
+            u = shutil.disk_usage(path)
+            total = u.total
+            used = u.used
+            free = u.free
+            if total > 0:
+                percent = round((used / total) * 100, 1)
+                used_pct = int(used * 100 // total)
+            free_gb = f"{free / (1024**3):.1f}"
+            total_gb = f"{total / (1024**3):.1f}"
+            used_gb = f"{used / (1024**3):.1f}"
+        except Exception:
+            pass
+
+        return {
+            "path": path,
+            "name": name,
+            "label": label,
+            "letter": letter,
+            "total": total,
+            "used": used,
+            "free": free,
+            "percent": percent,
+            "free_gb": free_gb,
+            "total_gb": total_gb,
+            "used_gb": used_gb,
+            "used_pct": used_pct,
+            "used_percent": percent,
+            "is_system": is_system
+        }
+
+    # 1. Android Termux Implementation
+    if is_termux():
+        seen = set()
+        # Internal Storage (/sdcard or ~/storage/shared)
+        sd_candidates = ["/sdcard", "/storage/emulated/0", os.path.expanduser("~/storage/shared")]
+        primary_sd = next((p for p in sd_candidates if os.path.exists(p)), "/sdcard")
+        drives.append(make_entry(primary_sd, "Internal Storage", "Internal Storage (/sdcard)", "SD", is_system=False))
+        seen.add(os.path.normpath(primary_sd))
+
+        # Downloads (/sdcard/Download or ~/storage/downloads)
+        dl_candidates = [os.path.join(primary_sd, "Download"), os.path.expanduser("~/storage/downloads")]
+        primary_dl = next((p for p in dl_candidates if os.path.exists(p)), os.path.join(primary_sd, "Download"))
+        if os.path.normpath(primary_dl) not in seen:
+            drives.append(make_entry(primary_dl, "Downloads", "Downloads (/sdcard/Download)", "DL", is_system=False))
+            seen.add(os.path.normpath(primary_dl))
+
+        # Termux Home (~)
+        home_path = os.path.expanduser("~")
+        if os.path.normpath(home_path) not in seen and os.path.exists(home_path):
+            drives.append(make_entry(home_path, "Termux Home", "Termux Home (~)", "TH", is_system=True))
+            seen.add(os.path.normpath(home_path))
+
+        # MicroSD / USB OTG mounts (/storage/XXXX-XXXX)
+        if os.path.exists("/storage"):
+            try:
+                for sub in os.listdir("/storage"):
+                    if sub in ("emulated", "self") or sub.startswith("."):
+                        continue
+                    sp = os.path.join("/storage", sub)
+                    if os.path.isdir(sp) and os.path.normpath(sp) not in seen:
+                        drives.append(make_entry(sp, f"Storage ({sub})", f"Storage ({sub})", "SD", is_system=False))
+                        seen.add(os.path.normpath(sp))
+            except Exception:
+                pass
+
+        # System Root (/) if readable
+        try:
+            if os.path.exists("/") and os.access("/", os.R_OK) and os.path.normpath("/") not in seen:
+                drives.append(make_entry("/", "System Root", "Root (/)", "/", is_system=False))
+                seen.add(os.path.normpath("/"))
+        except Exception:
+            pass
+
+    # 2. Windows Implementation
+    elif sys.platform == "win32":
         try:
             import ctypes
             bitmask = ctypes.windll.kernel32.GetLogicalDrives()
             for letter in string.ascii_uppercase:
                 if bitmask & 1:
                     drive_path = f"{letter}:\\"
-                    try:
-                        u = shutil.disk_usage(drive_path)
-                        used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
-                        drives.append({
-                            "path": drive_path,
-                            "name": f"Local Disk ({letter}:)",
-                            "letter": letter,
-                            "label": f"OS ({letter}:)" if letter.upper() == "C" else f"Data ({letter}:)" if letter.upper() == "D" else f"Local Disk ({letter}:)",
-                            "free_gb": f"{u.free / (1024**3):.1f}",
-                            "total_gb": f"{u.total / (1024**3):.1f}",
-                            "used_gb": f"{u.used / (1024**3):.1f}",
-                            "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
-                            "used_percent": used_pct_val,
-                            "is_system": letter.upper() == "C"
-                        })
-                    except Exception:
-                        drives.append({
-                            "path": drive_path,
-                            "name": f"Drive ({letter}:)",
-                            "letter": letter,
-                            "label": f"Drive ({letter}:)",
-                            "free_gb": "?",
-                            "total_gb": "?",
-                            "used_gb": "?",
-                            "used_pct": 0,
-                            "used_percent": 0.0,
-                            "is_system": letter.upper() == "C"
-                        })
+                    vol_name = get_windows_volume_label(drive_path)
+                    if vol_name:
+                        lbl = f"{vol_name} ({letter}:)"
+                        nm = f"{vol_name} ({letter}:)"
+                    else:
+                        lbl = f"OS ({letter}:)" if letter.upper() == "C" else f"Data ({letter}:)" if letter.upper() == "D" else f"Local Disk ({letter}:)"
+                        nm = f"Local Disk ({letter}:)"
+                    drives.append(make_entry(drive_path, nm, lbl, letter, is_system=(letter.upper() == "C")))
                 bitmask >>= 1
         except Exception:
             for letter in string.ascii_uppercase:
                 drive_path = f"{letter}:\\"
                 if os.path.exists(drive_path):
-                    try:
-                        u = shutil.disk_usage(drive_path)
-                        used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
-                        drives.append({
-                            "path": drive_path,
-                            "name": f"Drive ({letter}:)",
-                            "letter": letter,
-                            "label": f"Drive ({letter}:)",
-                            "free_gb": f"{u.free / (1024**3):.1f}",
-                            "total_gb": f"{u.total / (1024**3):.1f}",
-                            "used_gb": f"{u.used / (1024**3):.1f}",
-                            "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
-                            "used_percent": used_pct_val,
-                            "is_system": letter.upper() == "C"
-                        })
-                    except Exception:
-                        pass
+                    vol_name = get_windows_volume_label(drive_path)
+                    if vol_name:
+                        lbl = f"{vol_name} ({letter}:)"
+                        nm = f"{vol_name} ({letter}:)"
+                    else:
+                        lbl = f"OS ({letter}:)" if letter.upper() == "C" else f"Data ({letter}:)" if letter.upper() == "D" else f"Local Disk ({letter}:)"
+                        nm = f"Local Disk ({letter}:)"
+                    drives.append(make_entry(drive_path, nm, lbl, letter, is_system=(letter.upper() == "C")))
+
+    # 3. Linux & macOS Implementation
     else:
-        root_candidates = ["/", os.path.expanduser("~")]
-        for p in ["/Volumes", "/media", "/mnt"]:
-            if os.path.exists(p):
+        seen = set()
+        # Root (/)
+        if os.path.exists("/"):
+            drives.append(make_entry("/", "Root (/)", "Root (/)", "/", is_system=True))
+            seen.add(os.path.normpath("/"))
+
+        # User Home (~)
+        home_path = os.path.expanduser("~")
+        if os.path.exists(home_path) and os.path.normpath(home_path) not in seen:
+            drives.append(make_entry(home_path, "Home", "Home (~)", "~", is_system=False))
+            seen.add(os.path.normpath(home_path))
+
+        # Mount directories to scan
+        mount_roots = ["/Volumes", "/media", "/mnt"]
+        curr_user = CURRENT_USER or os.environ.get("USER", "")
+        if curr_user:
+            mount_roots.extend([f"/media/{curr_user}", f"/run/media/{curr_user}"])
+
+        for root_dir in mount_roots:
+            if os.path.exists(root_dir):
                 try:
-                    for sub in os.listdir(p):
-                        sp = os.path.join(p, sub)
-                        if os.path.isdir(sp):
-                            root_candidates.append(sp)
+                    for sub in os.listdir(root_dir):
+                        sp = os.path.join(root_dir, sub)
+                        if os.path.islink(sp):
+                            continue
+                        if os.path.isdir(sp) and os.path.normpath(sp) not in seen:
+                            label = sub
+                            drives.append(make_entry(sp, label, label, "/", is_system=False))
+                            seen.add(os.path.normpath(sp))
                 except Exception:
                     pass
-        for p in root_candidates:
-            if os.path.exists(p):
-                try:
-                    u = shutil.disk_usage(p)
-                    used_pct_val = round((u.used / u.total) * 100, 1) if u.total > 0 else 0.0
-                    drives.append({
-                        "path": p,
-                        "name": os.path.basename(p) or "Root (/)",
-                        "letter": "/",
-                        "label": os.path.basename(p) or "Root (/)",
-                        "free_gb": f"{u.free / (1024**3):.1f}",
-                        "total_gb": f"{u.total / (1024**3):.1f}",
-                        "used_gb": f"{u.used / (1024**3):.1f}",
-                        "used_pct": int(u.used * 100 // u.total) if u.total > 0 else 0,
-                        "used_percent": used_pct_val,
-                        "is_system": p == "/"
-                    })
-                except Exception:
-                    pass
+
     return drives
 
 
@@ -600,8 +740,8 @@ def browse_host_directory(path=""):
         }
 
     parent = os.path.dirname(target)
-    if parent == target:
-        parent = ""  # Reached top-level drive root
+    if parent == target or target == "/":
+        parent = ""  # Reached top-level drive root / storage overview
 
     subdirs = []
     try:
@@ -611,11 +751,16 @@ def browse_host_directory(path=""):
                     if entry.is_dir(follow_symlinks=False):
                         name = entry.name
                         # Filter system-protected / reserved Windows folders
-                        if name.startswith("$") or name in (
-                            "System Volume Information", "Recovery", "$WinREAgent",
-                            "Config.Msi", "MSOCache", "hiberfil.sys", "pagefile.sys"
-                        ):
-                            continue
+                        if sys.platform == "win32":
+                            if name.startswith("$") or name in (
+                                "System Volume Information", "Recovery", "$WinREAgent",
+                                "Config.Msi", "MSOCache", "hiberfil.sys", "pagefile.sys"
+                            ):
+                                continue
+                        else:
+                            # Filter virtual filesystem mounts on POSIX when browsing root
+                            if target == "/" and name in ("proc", "sys", "dev"):
+                                continue
                         subdirs.append({
                             "name": name,
                             "path": entry.path,
@@ -624,9 +769,12 @@ def browse_host_directory(path=""):
                 except (PermissionError, OSError):
                     continue
     except PermissionError:
+        err_msg = "Permission denied accessing folder"
+        if is_termux() or "/sdcard" in target or "/storage" in target:
+            err_msg = "Permission denied. Run 'termux-setup-storage' in Termux to grant storage access."
         return {
             "is_root": False,
-            "error": "Permission denied accessing folder",
+            "error": err_msg,
             "current_path": target,
             "parent_path": parent,
             "drives": drives,
@@ -660,58 +808,123 @@ def browse_host_directory(path=""):
     }
 
 
-def pick_folder_powershell(timeout_sec=120):
+def pick_folder_native(timeout_sec=120):
     """
-    Launch native Windows FolderBrowserDialog via PowerShell STA mode with topmost form focus.
-    Guarantees non-blocking execution in server threads and proper foreground window activation.
+    Launch native OS folder selection dialog across Windows, macOS, and Linux.
+    - Windows: PowerShell STA FolderBrowserDialog (with Tkinter fallback)
+    - macOS: AppleScript (osascript choose folder, with Tkinter fallback)
+    - Linux: zenity or kdialog (with Tkinter fallback)
+    - Android Termux / Headless: Returns (None, "unsupported_platform") for in-browser modal fallback
     """
-    if sys.platform != "win32":
+    if is_termux():
         return None, "unsupported_platform"
 
-    ps_script = (
-        "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;"
-        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;"
-        "$dialog.Description = 'Select folder for HostDrop File Transfer Hub';"
-        "$dialog.ShowNewFolderButton = $true;"
-        "$topForm = New-Object System.Windows.Forms.Form;"
-        "$topForm.TopMost = $true;"
-        "$topForm.Width = 0;"
-        "$topForm.Height = 0;"
-        "$topForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen;"
-        "$result = $dialog.ShowDialog($topForm);"
-        "$topForm.Dispose();"
-        "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath } else { Write-Output '' }"
-    )
-
-    cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
-        selected = proc.stdout.strip()
-        if selected and os.path.isdir(selected):
-            return selected, None
-        return None, "cancelled"
-    except subprocess.TimeoutExpired:
-        return None, "dialog_timeout"
-    except Exception as e:
-        # Fallback to Tkinter if PowerShell fails
+    # 1. Windows: PowerShell STA FolderBrowserDialog
+    if sys.platform == "win32":
+        ps_script = (
+            "[System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms') | Out-Null;"
+            "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;"
+            "$dialog.Description = 'Select folder for HostDrop File Transfer Hub';"
+            "$dialog.ShowNewFolderButton = $true;"
+            "$topForm = New-Object System.Windows.Forms.Form;"
+            "$topForm.TopMost = $true;"
+            "$topForm.Width = 0;"
+            "$topForm.Height = 0;"
+            "$topForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen;"
+            "$result = $dialog.ShowDialog($topForm);"
+            "$topForm.Dispose();"
+            "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath } else { Write-Output '' }"
+        )
+        cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script]
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.wm_attributes("-topmost", 1)
-            path = filedialog.askdirectory(title="Select folder for HostDrop")
-            root.destroy()
-            if path and os.path.isdir(path):
-                return path, None
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+            selected = proc.stdout.strip()
+            if selected and os.path.isdir(selected):
+                return selected, None
             return None, "cancelled"
+        except subprocess.TimeoutExpired:
+            return None, "dialog_timeout"
         except Exception:
-            return None, str(e)
+            pass
+
+    # 2. macOS: AppleScript osascript choose folder
+    elif sys.platform == "darwin":
+        osa_script = 'POSIX path of (choose folder with prompt "Select folder for HostDrop File Transfer Hub")'
+        cmd = ["osascript", "-e", osa_script]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+            if proc.returncode == 0:
+                selected = proc.stdout.strip()
+                if selected and os.path.isdir(selected):
+                    return selected, None
+                return None, "cancelled"
+            else:
+                err_text = proc.stderr.lower()
+                if "user canceled" in err_text or "-128" in err_text:
+                    return None, "cancelled"
+        except subprocess.TimeoutExpired:
+            return None, "dialog_timeout"
+        except Exception:
+            pass
+
+    # 3. Linux / POSIX: zenity or kdialog
+    else:
+        if shutil.which("zenity"):
+            cmd = ["zenity", "--file-selection", "--directory", "--title=Select folder for HostDrop File Transfer Hub"]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+                if proc.returncode == 0:
+                    selected = proc.stdout.strip()
+                    if selected and os.path.isdir(selected):
+                        return selected, None
+                    return None, "cancelled"
+                return None, "cancelled"
+            except subprocess.TimeoutExpired:
+                return None, "dialog_timeout"
+            except Exception:
+                pass
+        elif shutil.which("kdialog"):
+            cmd = ["kdialog", "--getexistingdirectory", os.path.expanduser("~"), "--title", "Select folder for HostDrop File Transfer Hub"]
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+                if proc.returncode == 0:
+                    selected = proc.stdout.strip()
+                    if selected and os.path.isdir(selected):
+                        return selected, None
+                    return None, "cancelled"
+                return None, "cancelled"
+            except subprocess.TimeoutExpired:
+                return None, "dialog_timeout"
+            except Exception:
+                pass
+
+    # 4. Universal GUI Fallback: Tkinter (if display server / desktop is active)
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.wm_attributes("-topmost", 1)
+        except Exception:
+            pass
+        path = filedialog.askdirectory(title="Select folder for HostDrop File Transfer Hub")
+        root.destroy()
+        if path and os.path.isdir(path):
+            return path, None
+        return None, "cancelled"
+    except Exception:
+        pass
+
+    return None, "unsupported_platform"
+
+
+pick_folder_powershell = pick_folder_native
 
 
 def open_in_os_explorer(target_dir, client_ip):
     """
-    Spawn the host OS file explorer (explorer.exe / open / xdg-open) in the foreground.
+    Spawn the host OS file explorer (explorer.exe / open / termux-open / xdg-open) in the foreground.
     Differentiates between localhost and remote clients.
     """
     is_local = client_ip in get_local_ip_set()
@@ -728,14 +941,34 @@ def open_in_os_explorer(target_dir, client_ip):
 
     norm = os.path.normpath(target_dir)
     try:
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer.exe", norm])
+        if is_termux():
+            cmd = ["termux-open", norm]
+        elif sys.platform == "win32":
+            cmd = ["explorer.exe", norm]
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", norm])
+            cmd = ["open", norm]
         else:
-            subprocess.Popen(["xdg-open", norm])
+            cmd = ["xdg-open", norm]
 
-        msg = "Opened folder in Windows Explorer" if is_local else "Folder opened on Host PC display (viewing in browser)"
+        # Check if launcher binary is available before attempting to spawn
+        launcher = cmd[0]
+        if launcher != "explorer.exe" and not shutil.which(launcher):
+            raise FileNotFoundError(f"{launcher} not available")
+
+        subprocess.Popen(cmd)
+
+        if is_local:
+            if is_termux():
+                msg = "Opened folder in File Manager"
+            elif sys.platform == "win32":
+                msg = "Opened folder in File Explorer"
+            elif sys.platform == "darwin":
+                msg = "Opened folder in Finder"
+            else:
+                msg = "Opened folder in File Manager"
+        else:
+            msg = "Folder opened on Host PC display (viewing in browser)"
+
         return {
             "success": True,
             "status": "ok",
@@ -743,6 +976,15 @@ def open_in_os_explorer(target_dir, client_ip):
             "is_local_client": is_local,
             "path": norm,
             "message": msg
+        }
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "status": "error",
+            "error": "file_manager_unavailable",
+            "is_local": is_local,
+            "is_local_client": is_local,
+            "message": "No graphical file manager available in this environment."
         }
     except Exception as e:
         return {
@@ -4570,7 +4812,12 @@ function renderModalDrives(drives) {
     
     const drivePathNorm = (d.path || '').toUpperCase().replace(/\\/g, '/');
     const curPathNorm = (activeModalBrowsePath || '').toUpperCase().replace(/\\/g, '/');
-    const isActive = curPathNorm && (curPathNorm.startsWith(drivePathNorm) || (d.letter && curPathNorm.startsWith(d.letter.toUpperCase() + ':')));
+    const isSlashRoot = drivePathNorm === '/';
+    const pathMatches = isSlashRoot
+      ? curPathNorm === '/'
+      : (curPathNorm && curPathNorm.startsWith(drivePathNorm));
+    const letterMatches = d.letter && /^[A-Za-z]$/.test(d.letter) && curPathNorm.startsWith(d.letter.toUpperCase() + ':');
+    const isActive = curPathNorm && (pathMatches || letterMatches);
 
     const card = document.createElement('div');
     card.className = 'drive-card' + (isActive ? ' active' : '');
@@ -4579,7 +4826,7 @@ function renderModalDrives(drives) {
       ? '<svg class="icon" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/><path d="M4 14v-4a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4"/></svg>'
       : '<svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>';
 
-    const badgeLabel = isActive ? 'Active' : (d.letter ? d.letter + ':' : 'Disk');
+    const badgeLabel = isActive ? 'Active' : (d.letter ? (/^[A-Za-z]$/.test(d.letter) ? d.letter + ':' : d.letter) : 'Disk');
 
     card.innerHTML = `
       <div class="drive-card-top">
@@ -6374,7 +6621,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
                 self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
                 return
             target_type = qs.get("target", ["share"])[0] or qs.get("type", ["share"])[0]
-            chosen, err = pick_folder_powershell()
+            chosen, err = pick_folder_native()
             if chosen:
                 with STATE_LOCK:
                     if target_type == "recv":
@@ -6610,7 +6857,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
             if not self.is_physical_localhost():
                 self.send_json({"success": False, "error": "forbidden", "message": "OS GUI folder picker is disabled over remote tunnels for security."}, status=403)
                 return
-            chosen, err = pick_folder_powershell()
+            chosen, err = pick_folder_native()
             if chosen:
                 self.send_json({"success": True, "status": "ok", "path": chosen})
             else:
@@ -6666,9 +6913,21 @@ def create_server(host: str = "0.0.0.0", port: int = 8080) -> ThreadingHTTPServe
 def main():
     global UPLOAD_DIR, SERVER_PORT, GLOBAL_TUNNEL_URL, GLOBAL_TUNNEL_PROVIDER
 
-    default_dir = r"D:\HostDrop" if os.path.exists("D:\\") else os.path.join(
-        os.path.expanduser("~"), "Downloads", "HostDrop"
-    )
+    if is_termux():
+        if os.path.exists("/sdcard") and os.access("/sdcard", os.W_OK):
+            default_dir = "/sdcard/HostDrop"
+        else:
+            termux_shared = os.path.join(os.path.expanduser("~"), "storage", "shared", "HostDrop")
+            if os.path.exists(os.path.dirname(termux_shared)) and os.access(os.path.dirname(termux_shared), os.W_OK):
+                default_dir = termux_shared
+            else:
+                default_dir = os.path.join(os.path.expanduser("~"), "HostDrop")
+    elif sys.platform == "win32":
+        default_dir = r"D:\HostDrop" if os.path.exists("D:\\") else os.path.join(
+            os.path.expanduser("~"), "Downloads", "HostDrop"
+        )
+    else:
+        default_dir = os.path.join(os.path.expanduser("~"), "HostDrop")
 
     chosen = default_dir
     tunnel_prov = os.environ.get("TUNNEL_PROVIDER", "auto").strip().lower()
@@ -6676,7 +6935,16 @@ def main():
     i = 1
     while i < len(sys.argv):
         arg = sys.argv[i].strip()
-        if arg in ("--tunnel", "-t") and i + 1 < len(sys.argv):
+        if arg in ("--help", "-h"):
+            print("HostDrop - High-Speed Cross-Platform File Transfer Hub")
+            print("Usage: hostdrop [OPTIONS] [DIRECTORY]")
+            print("\nOptions:")
+            print("  -p, --port PORT          Port to bind the server to (default: 8080)")
+            print("  -t, --tunnel PROVIDER    Tunnel provider: auto, cloudflare, pinggy, none (default: auto)")
+            print("  -h, --help               Show this help message and exit")
+            print("  DIRECTORY                Optional inbox folder to receive files")
+            sys.exit(0)
+        elif arg in ("--tunnel", "-t") and i + 1 < len(sys.argv):
             tunnel_prov = sys.argv[i + 1].strip().lower()
             i += 2
         elif arg.startswith("--tunnel="):

@@ -8,10 +8,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.8%2B-3776ab?style=flat-square&logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-0ea5e9?style=flat-square">
-  <img src="https://img.shields.io/badge/License-MIT-10b981?style=flat-square">
-  <img src="https://img.shields.io/badge/No%20Dependencies-Zero%20Install%20Required-f59e0b?style=flat-square">
+  <a href="https://github.com/Piyushdas1624/hostdrop"><img src="https://img.shields.io/badge/GitHub-Piyushdas1624%2Fhostdrop-181717?style=flat-square&logo=github" alt="GitHub Repository"></a>
+  <img src="https://img.shields.io/badge/Python-3.8%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-0ea5e9?style=flat-square" alt="Platform: Windows | Linux | macOS | Android">
+  <a href="https://pypi.org/project/hostdrop/"><img src="https://img.shields.io/pypi/v/hostdrop?style=flat-square&color=38bdf8" alt="PyPI Package"></a>
+  <img src="https://img.shields.io/badge/License-MIT-10b981?style=flat-square" alt="MIT License">
+  <img src="https://img.shields.io/badge/Dependencies-Zero%20Install-f59e0b?style=flat-square" alt="Zero Dependencies">
 </p>
 
 ---
@@ -26,7 +28,7 @@ HostDrop connects two or more devices over your local Wi-Fi router, a mobile hot
 | 📁 **Host drive navigator** | Built-in folder browser with drive capacity bars, breadcrumbs, and quick search |
 | ⚡ **Full LAN speed** | Direct Ethernet: 60 to 110 MB/s · Wi-Fi 5 GHz: 25 to 55 MB/s · Hotspot: 20 to 45 MB/s |
 | 🔁 **Smart resume** | Interrupted transfers verify `/api/check` and resume from the exact byte on disk |
-| 📱 **Cross-platform** | Works on Windows, macOS, Linux, iOS, Android, Smart TVs, and consoles in any browser |
+| 📱 **Cross-platform** | Native host engine on Windows, Linux, macOS & Android (Termux); clients work in any modern browser |
 | 🔌 **Direct Ethernet** | Automatic APIPA `169.254.x.x` detection for routerless PC-to-PC gigabit transfers |
 | 📡 **QR connect** | Scannable QR codes for Wi-Fi and mobile hotspot network interfaces |
 | 🗂️ **Dual folder download** | Download folders as on-the-fly streaming ZIP archives or save directly to disk |
@@ -36,25 +38,92 @@ HostDrop connects two or more devices over your local Wi-Fi router, a mobile hot
 
 ## How to run it
 
-### On Windows
+HostDrop requires **Python 3.8+** and runs with **zero required external dependencies** using the Python standard library. Choose your platform below to get started:
 
-1. Download or clone this repository.
-2. Double-click `Run_HostDrop.bat`.
-3. The script asks which folder on your PC should store incoming files (defaults to `D:\HostDrop` if you press Enter).
-4. The script starts the server and automatically opens `http://127.0.0.1:8080` in your default browser.
-5. Point connected phones or guest laptops to the Wi-Fi or Hotspot link displayed in the browser or terminal.
+### Windows
 
-### From the command line
+- **1-Click Launcher (Recommended)**:
+  1. Clone or download this repository:
+     ```bash
+     git clone https://github.com/Piyushdas1624/hostdrop.git
+     ```
+  2. Double-click `Run_HostDrop.bat`.
+  3. The script asks which folder on your PC should store incoming files (defaults to `D:\HostDrop` if available, otherwise `Downloads\HostDrop`).
+  4. The script starts the server and automatically opens `http://127.0.0.1:8080` in your default browser.
+  5. Point connected phones or guest laptops to the Wi-Fi or Hotspot link displayed in the browser or terminal.
 
-You need Python 3.8 or newer. The server uses Python standard libraries for core transfers. Optional libraries provide QR code generation and network adapter details.
+- **Or via pip (Global CLI)**:
+  ```bash
+  pip install hostdrop
+  hostdrop
+  ```
+  *(You can also specify a custom destination folder: `hostdrop "D:\HostDrop"`, or run directly from source: `python hostdrop.py "D:\HostDrop"`)*
+
+---
+
+### Linux & macOS
+
+- **Universal Launcher**:
+  1. Clone this repository:
+     ```bash
+     git clone https://github.com/Piyushdas1624/hostdrop.git
+     cd hostdrop
+     ```
+  2. Make the launcher executable and run it:
+     ```bash
+     chmod +x run_hostdrop.sh
+     ./run_hostdrop.sh
+     ```
+  3. The launcher automatically detects `python3` or `python`, prompts for an inbox folder (defaults to `~/HostDrop`), starts the server on port 8080, and opens your default browser (`xdg-open` on Linux, `open` on macOS).
+
+- **Or via pip (Global CLI)**:
+  ```bash
+  pip install hostdrop
+  hostdrop
+  ```
+  *(Or specify an inbox folder: `hostdrop ~/HostDrop`, or run directly from source: `python3 hostdrop.py ~/HostDrop`)*
+
+---
+
+### Android (via Termux)
+
+HostDrop runs as a full native host node on Android smartphones and tablets using [Termux](https://termux.dev/)!
 
 ```bash
-# Optional dependencies for QR code display and network adapter detection
-pip install qrcode[pil] psutil
-
-# Start server with a custom save folder
-python hostdrop.py "D:\HostDrop"
+pkg update && pkg install python
+termux-setup-storage
+pip install hostdrop
+hostdrop
 ```
+
+> **Why `termux-setup-storage`?**  
+> Running `termux-setup-storage` allows HostDrop to save incoming files directly to `/sdcard/HostDrop` (Android shared storage). This ensures received photos, videos, and documents are immediately visible in your Android Gallery, Google Photos, and Files app instead of being trapped in Termux's private sandbox.
+
+You can also run directly from source in Termux:
+```bash
+git clone https://github.com/Piyushdas1624/hostdrop.git
+cd hostdrop
+chmod +x run_hostdrop.sh
+./run_hostdrop.sh
+```
+
+---
+
+### Optional Features & Dependencies
+
+HostDrop core file transfer functionality is 100% self-contained with zero required external dependencies. Optional extras provide enhanced terminal features and system metrics:
+
+```bash
+# Terminal QR code rendering
+pip install hostdrop[qrcode]
+
+# Hardware network adapter statistics and live metrics
+pip install hostdrop[psutil]
+
+# Install all optional enhancements together
+pip install "hostdrop[qrcode,psutil]"
+```
+*(If running directly from source without installing the pip package: `pip install qrcode[pil] psutil`)*
 
 ---
 
@@ -175,8 +244,8 @@ HostDrop never requires an active internet connection to transfer files. If you 
 When global remote tunnels are active, HostDrop enforces strict perimeter defenses:
 - **Auto-Generated Memorable Passcode**: 8–10 character memorable passcode (e.g., `star-falcon-42`) with $\ge 30.0$ bits entropy, hashed with 600,000 PBKDF2 iterations and persisted in `.env`.
 - **Sliding-Window Lockout & Tarpitting**: Max 5 failed attempts per 15 minutes, with exponential tarpitting delay ($1\text{s} \to 16\text{s}$) and automatic HTTP 429 lockout.
-- **Strict Host Isolation**: Endpoints for server security info, active sessions, session revocation, and Windows Explorer triggering return HTTP 403 Forbidden to any request passing through tunnel proxy headers (`Forwarded`, `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`).
-- **NTFS Path Traversal Shield**: All file interactions pass through canonical path validation blocking Alternate Data Streams (`::$DATA`), 8.3 short names, null bytes, and UNC namespace escapes.
+- **Strict Host Isolation**: Endpoints for server security info, active sessions, session revocation, and host OS file manager launching return HTTP 403 Forbidden to any request passing through tunnel proxy headers (`Forwarded`, `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`).
+- **Path Traversal & Sandboxing Guard**: All file interactions pass through canonical path validation blocking Alternate Data Streams (`::$DATA`), 8.3 short names, null bytes, and UNC namespace escapes.
 
 See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model and penetration testing verification.
 
@@ -205,4 +274,6 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model and penetra
 
 This project is licensed under the MIT License.
 
-<p align="center">Made with ⚡ by <a href="https://github.com/Piyushdas1624">Piyush Das</a></p>
+<p align="center">
+  Made with ⚡ by <a href="https://github.com/Piyushdas1624">Piyush Das</a> · <a href="https://github.com/Piyushdas1624/hostdrop">GitHub Repository</a> · <a href="https://pypi.org/project/hostdrop/">PyPI Package</a>
+</p>

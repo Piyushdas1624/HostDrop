@@ -1,8 +1,11 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL / packaging files
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+build/
+dist/
+*.egg-info/
 
 # Temporary test scripts
 temp_script.js
