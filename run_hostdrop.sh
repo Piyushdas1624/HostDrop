@@ -63,9 +63,25 @@ else
     DEFAULT_DIR="$HOME/HostDrop"
 fi
 
-# Interactive prompt or command-line argument
-if [ -n "$1" ]; then
-    RECV_DIR="$1"
+# Check if command-line arguments were provided
+if [ $# -gt 0 ]; then
+    case "$1" in
+        -h|--help)
+            exec "$PYTHON_BIN" "$SCRIPT_DIR/hostdrop.py" "$@"
+            ;;
+        -*)
+            # Arguments are flags (e.g. --port, --host, etc.)
+            ;;
+        *)
+            # First argument is a directory path
+            RECV_DIR="$1"
+            case "$RECV_DIR" in
+                "~"/*) RECV_DIR="$HOME/${RECV_DIR#"~/"}" ;;
+                "~") RECV_DIR="$HOME" ;;
+            esac
+            mkdir -p "$RECV_DIR"
+            ;;
+    esac
 else
     echo "===================================================================="
     echo "   HostDrop — 2-Way Cross-Device File Transfer Hub"
@@ -78,29 +94,12 @@ else
     if [ -z "$RECV_DIR" ]; then
         RECV_DIR="$DEFAULT_DIR"
     fi
+    case "$RECV_DIR" in
+        "~"/*) RECV_DIR="$HOME/${RECV_DIR#"~/"}" ;;
+        "~") RECV_DIR="$HOME" ;;
+    esac
+    mkdir -p "$RECV_DIR"
 fi
-
-# Clean any trailing carriage returns (e.g. from Windows / CRLF pipes)
-RECV_DIR="$(printf '%s' "$RECV_DIR" | tr -d '\r')"
-
-# Expand leading tilde if user manually typed e.g. ~/folder
-case "$RECV_DIR" in
-    "~"/*) RECV_DIR="$HOME/${RECV_DIR#"~/"}" ;;
-    "~") RECV_DIR="$HOME" ;;
-esac
-
-# Ensure receive directory exists (only if not a CLI flag like --help or -h)
-case "$RECV_DIR" in
-    -*) ;;
-    *) mkdir -p "$RECV_DIR" ;;
-esac
-
-# If user asked for help, skip browser opening and print help directly
-case "$RECV_DIR" in
-    -h|--help)
-        exec "$PYTHON_BIN" "$SCRIPT_DIR/hostdrop.py" "$RECV_DIR"
-        ;;
-esac
 
 echo ""
 echo "===================================================================="
@@ -120,5 +119,9 @@ elif command -v xdg-open >/dev/null 2>&1; then
     xdg-open "http://127.0.0.1:8080" >/dev/null 2>&1 &
 fi
 
-# Launch HostDrop server
-exec "$PYTHON_BIN" "$SCRIPT_DIR/hostdrop.py" "$RECV_DIR"
+# Launch HostDrop server with all passed arguments or chosen directory
+if [ $# -gt 0 ]; then
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/hostdrop.py" "$@"
+else
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/hostdrop.py" "$RECV_DIR"
+fi

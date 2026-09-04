@@ -63,29 +63,34 @@ echo  Where do you want to save INCOMING files on this PC (Inbox)?
 echo  (Press ENTER to use %DEFAULT_DIR%, or type a custom path)
 echo.
 set /p RECV_DIR="  > Inbox folder path: "
-goto check_dir
-
-:got_param
-set "RECV_DIR=%~1"
-
-:check_dir
 if "%RECV_DIR%"=="" set "RECV_DIR=%DEFAULT_DIR%"
 set RECV_DIR=%RECV_DIR:"=%
+if not exist "%RECV_DIR%" mkdir "%RECV_DIR%" 2>nul
+goto start_server
 
-:: If user asked for help, execute directly without browser launch
-if /i "%RECV_DIR%"=="--help" goto run_help
-if /i "%RECV_DIR%"=="-h" goto run_help
-if /i "%RECV_DIR%"=="/?" goto run_help
-goto normal_start
+:got_param
+set "FIRST_PARAM=%~1"
+:: If argument starts with hyphen or slash, it is a flag
+if "%FIRST_PARAM:~0,1%"=="-" goto flag_start
+if "%FIRST_PARAM:~0,1%"=="/" goto flag_start
+
+:: Otherwise it is a directory path
+set "RECV_DIR=%~1"
+set RECV_DIR=%RECV_DIR:"=%
+if not exist "%RECV_DIR%" mkdir "%RECV_DIR%" 2>nul
+goto start_server
+
+:flag_start
+if /i "%FIRST_PARAM%"=="--help" goto run_help
+if /i "%FIRST_PARAM%"=="-h" goto run_help
+if /i "%FIRST_PARAM%"=="/?" goto run_help
+goto start_server
 
 :run_help
-%PYTHON_CMD% "%~dp0hostdrop.py" "%RECV_DIR%"
+%PYTHON_CMD% "%~dp0hostdrop.py" %*
 exit /b %ERRORLEVEL%
 
-:normal_start
-:: Ensure receive folder exists
-if not exist "%RECV_DIR%" mkdir "%RECV_DIR%" 2>nul
-
+:start_server
 echo.
 echo  ====================================================================
 echo     Starting HostDrop Hub on http://127.0.0.1:8080 ...
@@ -97,7 +102,11 @@ echo.
 start "" http://127.0.0.1:8080
 
 :: Start HostDrop server in foreground to maintain active terminal session
-%PYTHON_CMD% "%~dp0hostdrop.py" "%RECV_DIR%"
+if not "%~1"=="" (
+    %PYTHON_CMD% "%~dp0hostdrop.py" %*
+) else (
+    %PYTHON_CMD% "%~dp0hostdrop.py" "%RECV_DIR%"
+)
 
 echo.
 echo  HostDrop has stopped.

@@ -61,7 +61,7 @@ HostDrop requires **Python 3.8+** and runs with **zero required external depende
 
 ---
 
-### Linux & macOS
+### Linux and macOS
 
 - **Universal Launcher**:
   1. Clone this repository:
@@ -85,7 +85,7 @@ HostDrop requires **Python 3.8+** and runs with **zero required external depende
 
 ---
 
-### Android (via Termux)
+### Android using Termux
 
 HostDrop runs as a full native host node on Android smartphones and tablets using [Termux](https://termux.dev/)!
 
@@ -109,7 +109,7 @@ chmod +x run_hostdrop.sh
 
 ---
 
-### Optional Features & Dependencies
+### Optional features and dependencies
 
 HostDrop core file transfer functionality is 100% self-contained with zero required external dependencies. Optional extras provide enhanced terminal features and system metrics:
 
@@ -195,11 +195,11 @@ When downloading directories from the Library tab:
 
 ---
 
-## Global Remote Access (Access From Anywhere)
+## Global remote access (access from anywhere)
 
-HostDrop provides built-in encrypted tunneling so you can securely access your home PC from across town or across the globe over mobile cellular data or external Wi-Fi—without port forwarding, static public IPs, or router configuration.
+HostDrop provides built-in encrypted tunneling so you can securely access your home PC from across town or across the globe over mobile cellular data or external Wi-Fi without port forwarding, static public IPs, or router configuration.
 
-### How It Works Automatically
+### How it works automatically
 
 When HostDrop starts, it automatically orchestrates an outbound encrypted tunnel in the following order:
 
@@ -214,7 +214,7 @@ When HostDrop starts, it automatically orchestrates an outbound encrypted tunnel
    - **Zero Downloads Required**: Uses Windows 10/11's built-in `ssh.exe` (`C:\Windows\System32\OpenSSH\ssh.exe`), which is pre-installed on all modern Windows installations.
    - **Zero Configuration & No Account**: Automatically runs outbound over port 443 with keep-alives and yields an instant public HTTPS link (e.g., `https://random-name.a.pinggy.link`).
 
-### Optional 1-Click Cloudflare Tunnel Setup
+### Optional Cloudflare tunnel setup
 
 While Pinggy SSH works out of the box with zero downloads, you can optionally install Cloudflare Tunnel in one command via Windows Package Manager:
 
@@ -224,7 +224,7 @@ winget install --id Cloudflare.cloudflared
 
 After installation, restart HostDrop. It will automatically detect `cloudflared` and prioritize Cloudflare Tunnels.
 
-### 100% Offline LAN Guarantee
+### Complete offline LAN guarantee
 
 HostDrop never requires an active internet connection to transfer files. If you are operating in air-gapped environments, on airplanes, on field sites, or simply do not want any global tunnels opened:
 
@@ -237,12 +237,12 @@ HostDrop never requires an active internet connection to transfer files. If you 
   HostDrop works 100% locally over:
   - **Local Wi-Fi Network**: Accessible to all devices on the same router subnet (`http://192.168.x.x:8080`).
   - **Windows Mobile Hotspot**: Connect your phone directly to your laptop's 5 GHz hotspot (`http://192.168.137.1:8080`).
-  - **Direct Ethernet Cable**: Plug an RJ-45 cable directly between two PCs. Windows auto-assigns APIPA `169.254.x.x` addresses, enabling routerless transfers at 60–110 MB/s.
+  - **Direct Ethernet Cable**: Plug an RJ-45 cable directly between two PCs. Windows auto-assigns APIPA `169.254.x.x` addresses, enabling routerless transfers at 60 to 110 MB/s.
 
-### Remote Access Security Architecture
+### Remote access security architecture
 
 When global remote tunnels are active, HostDrop enforces strict perimeter defenses:
-- **Auto-Generated Memorable Passcode**: 8–10 character memorable passcode (e.g., `star-falcon-42`) with $\ge 30.0$ bits entropy, hashed with 600,000 PBKDF2 iterations and persisted in `.env`.
+- **Auto-Generated Memorable Passcode**: 8 to 10 character memorable passcode (e.g., `star-falcon-42`) with $\ge 30.0$ bits entropy, hashed with 600,000 PBKDF2 iterations and persisted in `.env`.
 - **Sliding-Window Lockout & Tarpitting**: Max 5 failed attempts per 15 minutes, with exponential tarpitting delay ($1\text{s} \to 16\text{s}$) and automatic HTTP 429 lockout.
 - **Strict Host Isolation**: Endpoints for server security info, active sessions, session revocation, and host OS file manager launching return HTTP 403 Forbidden to any request passing through tunnel proxy headers (`Forwarded`, `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, `True-Client-IP`).
 - **Path Traversal & Sandboxing Guard**: All file interactions pass through canonical path validation blocking Alternate Data Streams (`::$DATA`), 8.3 short names, null bytes, and UNC namespace escapes.

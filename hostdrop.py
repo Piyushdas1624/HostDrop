@@ -43,6 +43,7 @@ def get_windows_volume_label(drive_path: str) -> str:
         return ""
     try:
         import ctypes
+        ctypes.windll.kernel32.SetErrorMode(0x0001)  # SEM_FAILCRITICALERRORS: suppress OS drive error dialogs
         buf = ctypes.create_unicode_buffer(1024)
         fs_buf = ctypes.create_unicode_buffer(1024)
         success = ctypes.windll.kernel32.GetVolumeInformationW(
@@ -222,7 +223,14 @@ class TunnelManager:
         # Fallback to Pinggy SSH
         ssh_bin = shutil.which("ssh")
         if not ssh_bin:
-            for cand in [r"C:\Windows\System32\OpenSSH\ssh.exe", "/usr/bin/ssh", "/usr/local/bin/ssh"]:
+            termux_prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+            for cand in [
+                r"C:\Windows\System32\OpenSSH\ssh.exe",
+                os.path.join(termux_prefix, "bin", "ssh"),
+                "/data/data/com.termux/files/usr/bin/ssh",
+                "/usr/bin/ssh",
+                "/usr/local/bin/ssh"
+            ]:
                 if os.path.isfile(cand):
                     ssh_bin = cand
                     break
@@ -277,7 +285,10 @@ class TunnelManager:
                             TUNNEL_PROC.kill()
                         except Exception:
                             pass
-                    TUNNEL_PROC = None
+        if provider != "none" and not GLOBAL_TUNNEL_URL and not TUNNEL_PROC:
+            print("  [-] Global Remote Access notice: Neither 'cloudflared' nor 'ssh' was found on your system.")
+            print("      HostDrop is operating in 100% Offline LAN / Wi-Fi mode.")
+            print("      To enable global remote access, install cloudflared or OpenSSH.")
 
         return ""
 
@@ -648,6 +659,7 @@ def get_host_drives():
     elif sys.platform == "win32":
         try:
             import ctypes
+            ctypes.windll.kernel32.SetErrorMode(0x0001)  # SEM_FAILCRITICALERRORS: suppress OS drive error dialogs
             bitmask = ctypes.windll.kernel32.GetLogicalDrives()
             for letter in string.ascii_uppercase:
                 if bitmask & 1:
@@ -3419,11 +3431,11 @@ body {
           <svg class="icon" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
           Change Folder
         </button>
-        <button class="btn btn-sm" onclick="triggerNativePicker('recv')" title="Launch Windows Folder Dialog on Host">
+        <button class="btn btn-sm" id="recvNativePickerBtn" onclick="triggerNativePicker('recv')" title="Launch Windows Folder Dialog on Host">
           <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
           Windows Dialog
         </button>
-        <button class="btn btn-sm btn-ghost" onclick="openInExplorer('recv')" title="Open folder in Windows Explorer">
+        <button class="btn btn-sm btn-ghost" id="recvOpenExplorerBtn" onclick="openInExplorer('recv')" title="Open folder in Windows Explorer">
           <svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           Open in Windows Explorer
         </button>
@@ -3468,11 +3480,11 @@ body {
           <svg class="icon" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/></svg>
           Select Folder to Share
         </button>
-        <button class="btn btn-sm" onclick="triggerNativePicker('share')" title="Launch Windows Folder Dialog on Host">
+        <button class="btn btn-sm" id="shareNativePickerBtn" onclick="triggerNativePicker('share')" title="Launch Windows Folder Dialog on Host">
           <svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
           Windows Dialog
         </button>
-        <button class="btn btn-sm btn-ghost" onclick="openInExplorer('share')" title="Open folder in Windows Explorer">
+        <button class="btn btn-sm btn-ghost" id="shareOpenExplorerBtn" onclick="openInExplorer('share')" title="Open folder in Windows Explorer">
           <svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           Open in Windows Explorer
         </button>
@@ -3854,7 +3866,7 @@ body {
     </div>
 
     <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" onclick="triggerNativePicker(browserModalTarget)" title="Open standard Windows Explorer folder picker on Host">
+      <button class="btn btn-ghost btn-sm" id="modalNativePickerBtn" onclick="triggerNativePicker(browserModalTarget)" title="Open standard Windows Explorer folder picker on Host">
         <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>
         <span>Windows Dialog</span>
       </button>
@@ -4162,6 +4174,8 @@ let activeFaqCategory = 'all';
 
 /* Network Interfaces injected from backend */
 window.hostNetInterfaces = __NET_INTERFACES_JSON__;
+window.hostOS = "__HOST_OS__";
+let modalBrowseError = null;
 
 /* Host vs Guest Role Adaptive State */
 const isHostClient = ['localhost', '127.0.0.1', '::1', ''].includes(window.location.hostname);
@@ -4181,6 +4195,53 @@ function applyClientRole() {
     if (guestPill) guestPill.style.display = 'inline-flex';
     if (guestBanner) guestBanner.style.display = 'block';
   }
+
+  applyPlatformAdaptations();
+}
+
+function applyPlatformAdaptations() {
+  const hostOS = window.hostOS || 'windows';
+  let openLabel = 'Open in File Explorer';
+  let pickerLabel = 'Windows Dialog';
+  let openTitle = 'Open folder in Windows Explorer';
+  let pickerTitle = 'Open native folder picker on Host';
+
+  if (hostOS === 'macos') {
+    openLabel = 'Open in Finder';
+    openTitle = 'Open folder in macOS Finder';
+    pickerLabel = 'System Dialog';
+  } else if (hostOS === 'linux' || hostOS === 'termux') {
+    openLabel = 'Open in File Manager';
+    openTitle = 'Open folder in system file manager';
+    pickerLabel = 'System Dialog';
+  }
+
+  // Update button texts and titles
+  ['recvOpenExplorerBtn', 'shareOpenExplorerBtn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      if (!isHostClient) {
+        el.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> View in Browser';
+        el.title = 'Switch active tab to view this folder in browser';
+      } else {
+        el.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> ${openLabel}`;
+        el.title = openTitle;
+      }
+    }
+  });
+
+  ['recvNativePickerBtn', 'shareNativePickerBtn', 'modalNativePickerBtn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      if (!isHostClient) {
+        el.style.display = 'none';
+      } else {
+        el.style.display = '';
+        el.innerHTML = `<svg class="icon" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg> <span>${pickerLabel}</span>`;
+        el.title = pickerTitle;
+      }
+    }
+  });
 }
 
 /* Ribbon Horizontal Wheel Scroll & Chevrons */
@@ -4233,7 +4294,15 @@ async function loadDirectory(tab, relPath, showLoading = false) {
   
   try {
     const res = await fetch('/api/list?tab=' + tab + '&path=' + encodeURIComponent(relPath));
+    if (res.status === 401) {
+      openAuthModal();
+      return;
+    }
     const data = await res.json();
+    if (data.login_required || data.error === 'unauthorized') {
+      openAuthModal();
+      return;
+    }
     currentItems = data.items || [];
 
     // Update Tab Badges
@@ -4577,6 +4646,9 @@ async function handleFileSelect(files) {
   const card = document.getElementById('transferCard');
   card.classList.add('active');
 
+  let successCount = 0;
+  let failCount = 0;
+
   for (let i = 0; i < fileArray.length; i++) {
     const file = fileArray[i];
     const relPath = file.webkitRelativePath || file.name;
@@ -4584,15 +4656,22 @@ async function handleFileSelect(files) {
     
     try {
       await uploadFileWithSmartResume(file, relPath);
+      successCount++;
     } catch (e) {
+      failCount++;
       showToast(`Upload failed for ${file.name}: ${e.message}`, 'error');
     }
   }
 
   isTransferring = false;
   setTimeout(() => card.classList.remove('active'), 2500);
-  document.getElementById('transStatus').textContent = 'All transfers complete!';
-  showToast('Upload complete!', 'success');
+  if (failCount === 0) {
+    document.getElementById('transStatus').textContent = 'All transfers complete!';
+    showToast('Upload complete!', 'success');
+  } else {
+    document.getElementById('transStatus').textContent = `${successCount} transferred, ${failCount} failed`;
+    showToast(`Transfers finished: ${failCount} file(s) failed`, 'error');
+  }
   refreshActiveDirectory();
   fetchStorageMetrics();
 }
@@ -4657,7 +4736,13 @@ async function uploadFileWithSmartResume(file, relPath) {
         updateProgressUI(file.size, file.size, 'Saved');
         resolve();
       } else {
-        reject(new Error(xhr.statusText || 'Upload failed'));
+        let errMsg = xhr.statusText || 'Upload failed';
+        try {
+          const resp = JSON.parse(xhr.responseText);
+          if (resp && resp.error) errMsg = resp.error;
+          else if (resp && resp.message) errMsg = resp.message;
+        } catch (_) {}
+        reject(new Error(errMsg));
       }
     };
 
@@ -4775,6 +4860,7 @@ async function browseModalPath(path) {
     modalParentPath = (data.parent_path !== undefined) ? data.parent_path : '';
     modalIsRoot = !!data.is_root;
     modalCurrentSubdirs = data.subdirs || [];
+    modalBrowseError = data.error || null;
     modalFocusedFolderIndex = -1;
 
     if (inputEl) inputEl.value = activeModalBrowsePath;
@@ -4793,6 +4879,10 @@ async function browseModalPath(path) {
 
     // Filter and render subfolder list
     filterModalFolders();
+
+    if (modalBrowseError) {
+      showToast(modalBrowseError, 'error');
+    }
 
   } catch (e) {
     listEl.innerHTML = `<div style="padding: 20px; color: var(--status-error); text-align: center;">Error browsing: ${escapeHtml(e.message)}</div>`;
@@ -5006,6 +5096,26 @@ function filterModalFolders() {
   listEl.innerHTML = '';
   modalFocusedFolderIndex = -1;
 
+  if (modalBrowseError) {
+    const errDiv = document.createElement('div');
+    errDiv.style.padding = '20px 16px';
+    errDiv.style.margin = '12px 8px';
+    errDiv.style.borderRadius = '8px';
+    errDiv.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+    errDiv.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+    errDiv.style.color = '#ef4444';
+    errDiv.style.textAlign = 'center';
+    errDiv.innerHTML = `
+      <div style="font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; justify-content: center; gap: 6px;">
+        <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span>Folder Inaccessible</span>
+      </div>
+      <div style="font-size: 13px; color: var(--text-secondary);">${escapeHtml(modalBrowseError)}</div>
+    `;
+    listEl.appendChild(errDiv);
+    return;
+  }
+
   if (filtered.length === 0) {
     if (modalCurrentSubdirs.length === 0 && !modalIsRoot) {
       const emptyDiv = document.createElement('div');
@@ -5214,7 +5324,8 @@ document.addEventListener('DOMContentLoaded', () => {
    HOST OS INTEGRATION (PowerShell STA Picker & OS Explorer Spawner)
    ═══════════════════════════════════════════════════════════════════════════════ */
 async function triggerNativePicker(target) {
-  showToast('Opening native Windows folder dialog on Host PC...', 'info');
+  const isWin = (window.hostOS || 'windows') === 'windows';
+  showToast(`Opening native ${isWin ? 'Windows' : 'system'} folder dialog on Host PC...`, 'info');
   try {
     const res = await fetch('/api/pick_folder?target=' + target);
     const data = await res.json();
@@ -5230,10 +5341,10 @@ async function triggerNativePicker(target) {
       fetchStorageMetrics();
       loadDirectory(activeTab, '', true);
     } else if (data.error !== 'cancelled') {
-      showToast('Windows dialog notice: ' + data.error, 'info');
+      showToast(data.message || ((isWin ? 'Windows dialog notice: ' : 'System dialog notice: ') + data.error), 'info');
     }
   } catch (e) {
-    showToast('Failed to trigger Windows dialog: ' + e, 'error');
+    showToast('Failed to trigger dialog: ' + e.message, 'error');
   }
 }
 
@@ -5242,16 +5353,16 @@ async function openInExplorer(target) {
     const res = await fetch('/api/open_folder?type=' + target);
     const data = await res.json();
     if (data.success || data.status === 'ok') {
-      showToast(data.message || 'Opened folder in Windows Explorer', 'success');
+      showToast(data.message || 'Opened folder in file manager', 'success');
       if (!data.is_local && !data.is_local_client) {
         // Remote client viewing fallback: switch active tab to view in browser
         switchTab(target);
       }
     } else {
-      showToast('Could not open folder: ' + data.error, 'error');
+      showToast(data.message || ('Could not open folder: ' + data.error), 'error');
     }
   } catch (e) {
-    showToast('Failed to launch Windows Explorer: ' + e, 'error');
+    showToast('Failed to launch file manager: ' + e.message, 'error');
   }
 }
 
@@ -6237,7 +6348,10 @@ def render_page(port, is_admin=False):
         for i in ifaces
     ])
 
+    host_os = "termux" if is_termux() else ("macos" if sys.platform == "darwin" else ("windows" if sys.platform == "win32" else "linux"))
+
     out = HTML_TEMPLATE.replace("__PORT__", str(port))
+    out = out.replace("__HOST_OS__", host_os)
     out = out.replace("__NET_INTERFACES_JSON__", ifaces_json)
     out = out.replace("__NET_ITEMS__", net_items_html)
     out = out.replace("__RECV_PATH__", recv_path_esc)
@@ -6439,7 +6553,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
             rel = qs.get("path", [""])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if tab == "share" else UPLOAD_DIR
-            is_admin = self.is_authenticated()
+            is_admin = self.is_physical_localhost()
             if not base or not os.path.exists(base):
                 self.send_json({
                     "items": [],
@@ -6639,7 +6753,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
                 return
             if not self.is_physical_localhost():
-                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening native file manager is only available directly on the Host PC."}, status=403)
                 return
             target_type = qs.get("type", ["recv"])[0] or qs.get("target", ["recv"])[0]
             with STATE_LOCK:
@@ -6870,7 +6984,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "unauthorized", "login_required": True, "message": "Authentication required to open folders."}, status=401)
                 return
             if not self.is_physical_localhost():
-                self.send_json({"success": False, "error": "forbidden", "message": "Opening Windows Explorer is disabled over remote tunnels for security."}, status=403)
+                self.send_json({"success": False, "error": "forbidden", "message": "Opening native file manager is only available directly on the Host PC."}, status=403)
                 return
             content_len = safe_int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_len) if content_len > 0 else b"{}"
@@ -6969,7 +7083,18 @@ def main():
             i += 1
 
     UPLOAD_DIR = os.path.abspath(chosen)
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+    except OSError as e:
+        print(f"[-] Warning: Could not create chosen directory '{UPLOAD_DIR}': {e}")
+        fallback = os.path.expanduser("~/HostDrop")
+        try:
+            os.makedirs(fallback, exist_ok=True)
+            UPLOAD_DIR = fallback
+            print(f"[+] Falling back to user directory: {UPLOAD_DIR}")
+        except OSError:
+            UPLOAD_DIR = os.getcwd()
+            print(f"[+] Falling back to current directory: {UPLOAD_DIR}")
 
     # Initialize Auth Configuration
     if auth:
@@ -7009,7 +7134,13 @@ def main():
         except Exception:
             pass
 
-    server = create_server("0.0.0.0", SERVER_PORT)
+    try:
+        server = create_server("0.0.0.0", SERVER_PORT)
+    except OSError as e:
+        print(f"\n[ERROR] Failed to start server on port {SERVER_PORT}: {e}")
+        print(f"        Port {SERVER_PORT} is likely already occupied by another process.")
+        print(f"        To run on a different port, use: hostdrop --port <number> (e.g. hostdrop --port 8081)")
+        sys.exit(1)
 
     try:
         server.serve_forever()
