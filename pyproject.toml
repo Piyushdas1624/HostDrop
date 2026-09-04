@@ -46,3 +46,8 @@ hostdrop = "hostdrop:main"
 
 [tool.setuptools]
 py-modules = ["hostdrop", "auth"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
