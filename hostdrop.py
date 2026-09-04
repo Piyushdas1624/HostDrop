@@ -4674,12 +4674,130 @@ async function handleFileSelect(files) {
   }
   refreshActiveDirectory();
   fetchStorageMetrics();
+  const fi = document.getElementById('fileInput'); if (fi) fi.value = '';
+  const fo = document.getElementById('folderInput'); if (fo) fo.value = '';
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SMART ADAPTIVE CHUNKED UPLOAD ENGINE (Cloudflare 90MB / LAN 100MB)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Dynamically resolves chunk size based on network environment:
+ * - Cloudflare Tunnel (*.trycloudflare.com): 90 MB (safely under decimal 100MB body cap + headers)
+ * - LAN / Hotspot / Direct Cable / Pinggy SSH / Localhost: 100 MB
+ */
+function getAdaptiveChunkSize() {
+  const host = (window.location.hostname || '').toLowerCase();
+  if (host.endsWith('trycloudflare.com') || host.includes('trycloudflare.com')) {
+    return 90 * 1024 * 1024; // 90 MB for Cloudflare Tunnel
+  }
+  return 100 * 1024 * 1024;   // 100 MB for LAN, Cable, Hotspot, and Pinggy SSH
+}
+
+/**
+ * Uploads a single slice/payload via XMLHttpRequest with inactivity watchdog.
+ */
+function uploadSingleChunk(chunkPayload, offset, fullTargetRel, totalFileSize, onChunkProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    // 25-Second Inactivity Watchdog Timer (resets on active data flow)
+    let lastActive = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastActive > 25000) {
+        clearInterval(watchdog);
+        xhr.abort();
+        const err = new Error('Connection timed out during chunk transfer');
+        err.isTimeout = true;
+        reject(err);
+      }
+    }, 4000);
+
+    xhr.upload.onprogress = e => {
+      lastActive = Date.now();
+      if (onChunkProgress) {
+        onChunkProgress(e.loaded);
+      }
+    };
+
+    const uploadUrl = '/api/upload?path=' + encodeURIComponent(fullTargetRel) + '&offset=' + offset + '&total_size=' + totalFileSize;
+    xhr.open('POST', uploadUrl, true);
+    xhr.setRequestHeader('X-Total-Size', totalFileSize.toString());
+
+    xhr.onload = () => {
+      clearInterval(watchdog);
+      if (xhr.status === 200) {
+        resolve();
+      } else {
+        let errMsg = xhr.statusText || ('Upload failed with status ' + xhr.status);
+        try {
+          const resp = JSON.parse(xhr.responseText);
+          if (resp && resp.error) errMsg = resp.error;
+          else if (resp && resp.message) errMsg = resp.message;
+        } catch (_) {}
+        const err = new Error(errMsg);
+        err.status = xhr.status;
+        reject(err);
+      }
+    };
+
+    xhr.onerror = () => {
+      clearInterval(watchdog);
+      const err = new Error('Network error during chunk upload');
+      err.isNetwork = true;
+      reject(err);
+    };
+
+    xhr.onabort = () => {
+      clearInterval(watchdog);
+      const err = new Error('Chunk upload aborted');
+      err.isAbort = true;
+      reject(err);
+    };
+
+    xhr.send(chunkPayload);
+  });
+}
+
+/**
+ * Wraps uploadSingleChunk with up to 3 automated retries using exponential backoff.
+ */
+async function uploadChunkWithRetry(chunkPayload, offset, fullTargetRel, totalFileSize, chunkIndex, totalChunks, onChunkProgress) {
+  const maxRetries = 3;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await uploadSingleChunk(chunkPayload, offset, fullTargetRel, totalFileSize, onChunkProgress);
+      return; // Succeeded!
+    } catch (err) {
+      lastErr = err;
+      // Fail immediately on non-retryable authorization or storage quota errors
+      if (err.status === 401 || err.status === 403 || err.status === 413 || err.status === 507) {
+        throw err;
+      }
+      if (attempt < maxRetries) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt), 8000);
+        showToast(
+          `Chunk ${chunkIndex + 1}/${totalChunks} connection glitch. Retrying (${attempt + 1}/${maxRetries}) in ${backoffMs / 1000}s...`,
+          'info'
+        );
+        await new Promise(r => setTimeout(r, backoffMs));
+      }
+    }
+  }
+  throw lastErr || new Error(`Chunk ${chunkIndex + 1}/${totalChunks} failed after ${maxRetries} retries`);
+}
+
+/**
+ * Main Smart Resumable Chunked Upload entry point.
+ */
 async function uploadFileWithSmartResume(file, relPath) {
   const fullTargetRel = curRecvPath ? curRecvPath + '/' + relPath : relPath;
-  
-  // 1. Check existing byte length on server for smart resumption
+  const CHUNK_SIZE = getAdaptiveChunkSize();
+
+  // 1. Pre-flight check: query /api/check to detect existing bytes and skip automatically
   let startOffset = 0;
   try {
     const checkRes = await fetch('/api/check?path=' + encodeURIComponent(fullTargetRel));
@@ -4692,73 +4810,75 @@ async function uploadFileWithSmartResume(file, relPath) {
       } else if (checkData.size < file.size) {
         startOffset = checkData.size;
         showToast(`Resuming ${file.name} from ${formatBytes(startOffset)}...`, 'info');
+      } else {
+        startOffset = 0;
       }
     }
   } catch (e) {
     startOffset = 0;
   }
 
-  // 2. Perform resumable stream upload with watchdog timer
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    let lastLoaded = startOffset;
-    let lastTime = Date.now();
+  // 2. Continuous velocity tracking across chunk boundaries
+  let speedLastLoaded = startOffset;
+  let speedLastTime = Date.now();
 
-    // 25-Second Watchdog Timer
-    let lastActive = Date.now();
-    const watchdog = setInterval(() => {
-      if (Date.now() - lastActive > 25000) {
-        clearInterval(watchdog);
-        xhr.abort();
-        reject(new Error('Connection timed out'));
-      }
-    }, 4000);
-
-    xhr.upload.onprogress = e => {
-      lastActive = Date.now();
-      const currentTotalLoaded = startOffset + e.loaded;
-      const now = Date.now();
-      const dt = (now - lastTime) / 1000;
-      if (dt > 0.4) {
-        const speedMB = ((e.loaded - (lastLoaded - startOffset)) / (1024 * 1024)) / dt;
-        lastLoaded = currentTotalLoaded;
-        lastTime = now;
+  function trackProgress(currentTotalLoaded, statusText) {
+    const now = Date.now();
+    const dt = (now - speedLastTime) / 1000;
+    if (dt > 0.4) {
+      const bytesDelta = currentTotalLoaded - speedLastLoaded;
+      if (bytesDelta > 0) {
+        const speedMB = (bytesDelta / (1024 * 1024)) / dt;
         document.getElementById('transSpeed').textContent = `${speedMB.toFixed(1)} MB/s`;
       }
-      updateProgressUI(currentTotalLoaded, file.size, 'Uploading...');
-    };
+      speedLastLoaded = currentTotalLoaded;
+      speedLastTime = now;
+    }
+    updateProgressUI(currentTotalLoaded, file.size, statusText);
+  }
 
-    xhr.open('POST', '/api/upload?path=' + encodeURIComponent(fullTargetRel) + '&offset=' + startOffset, true);
-
-    xhr.onload = () => {
-      clearInterval(watchdog);
-      if (xhr.status === 200) {
-        updateProgressUI(file.size, file.size, 'Saved');
-        resolve();
-      } else {
-        let errMsg = xhr.statusText || 'Upload failed';
-        try {
-          const resp = JSON.parse(xhr.responseText);
-          if (resp && resp.error) errMsg = resp.error;
-          else if (resp && resp.message) errMsg = resp.message;
-        } catch (_) {}
-        reject(new Error(errMsg));
-      }
-    };
-
-    xhr.onerror = () => {
-      clearInterval(watchdog);
-      reject(new Error('Network error during upload'));
-    };
-
-    xhr.onabort = () => {
-      clearInterval(watchdog);
-      reject(new Error('Upload aborted'));
-    };
-
+  // 3. Single-Request Optimization: if file <= CHUNK_SIZE, send in single POST without slicing
+  if (file.size <= CHUNK_SIZE) {
     const payload = startOffset > 0 ? file.slice(startOffset) : file;
-    xhr.send(payload);
-  });
+    await uploadChunkWithRetry(
+      payload,
+      startOffset,
+      fullTargetRel,
+      file.size,
+      0,
+      1,
+      chunkLoaded => trackProgress(startOffset + chunkLoaded, 'Uploading...')
+    );
+    updateProgressUI(file.size, file.size, 'Saved');
+    return;
+  }
+
+  // 4. Sequential Chunk Streaming with HTTP Keep-Alive connection reuse
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  let currentOffset = startOffset;
+
+  while (currentOffset < file.size) {
+    const chunkIndex = Math.floor(currentOffset / CHUNK_SIZE);
+    // Align chunk boundary to exact multiple of CHUNK_SIZE
+    const nextOffset = Math.min(((chunkIndex + 1) * CHUNK_SIZE), file.size);
+    const chunkPayload = file.slice(currentOffset, nextOffset);
+    const chunkStatus = `Uploading chunk ${chunkIndex + 1}/${totalChunks}...`;
+
+    await uploadChunkWithRetry(
+      chunkPayload,
+      currentOffset,
+      fullTargetRel,
+      file.size,
+      chunkIndex,
+      totalChunks,
+      chunkLoaded => trackProgress(currentOffset + chunkLoaded, chunkStatus)
+    );
+
+    currentOffset = nextOffset;
+    trackProgress(currentOffset, chunkStatus);
+  }
+
+  updateProgressUI(file.size, file.size, 'Saved');
 }
 
 function updateProgressUI(loaded, total, statusText) {
@@ -6371,6 +6491,8 @@ def render_page(port, is_admin=False):
 #  HTTP REQUEST ROUTER (Zero-Dependency Python Backend)
 # ═══════════════════════════════════════════════════════════════════════════════
 class HostDropHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    timeout = 60
 
     def send_security_headers(self):
         """Inject strict defense-in-depth HTTP security headers."""
@@ -6603,17 +6725,24 @@ class HostDropHandler(BaseHTTPRequestHandler):
         # ── Smart Resume Byte Check ──
         if path == "/api/check":
             if not self.is_authenticated():
-                self.send_json({"exists": False, "size": 0, "login_required": True}, status=401)
+                self.send_json({"exists": False, "size": 0, "free_bytes": 0, "login_required": True}, status=401)
                 return
             rel = qs.get("path", [""])[0] or qs.get("filename", [""])[0]
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
             full = safe_path(base, rel)
+            target_dir = os.path.dirname(full) if full else (base if (base and os.path.isdir(base)) else UPLOAD_DIR)
+            free_bytes = 0
+            try:
+                if target_dir and os.path.exists(target_dir):
+                    free_bytes = shutil.disk_usage(target_dir).free
+            except Exception:
+                pass
             if full and os.path.isfile(full):
-                self.send_json({"exists": True, "size": os.path.getsize(full)})
+                self.send_json({"exists": True, "size": os.path.getsize(full), "free_bytes": free_bytes})
             else:
-                self.send_json({"exists": False, "size": 0})
+                self.send_json({"exists": False, "size": 0, "free_bytes": free_bytes})
             return
 
         # ── Download Single File ──
@@ -6817,6 +6946,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
                 return
             rel = qs.get("path", ["upload"])[0]
             offset = safe_int(qs.get("offset", [0]))
+            total_size = safe_int(qs.get("total_size", [0])) or safe_int(qs.get("total", [0])) or safe_int(self.headers.get("X-Total-Size", 0))
             target_type = qs.get("target", ["recv"])[0]
             with STATE_LOCK:
                 base = HOST_SHARE if target_type == "share" else UPLOAD_DIR
@@ -6826,33 +6956,62 @@ class HostDropHandler(BaseHTTPRequestHandler):
 
             try:
                 content_len = safe_int(self.headers.get("Content-Length", 0))
-                if content_len > MAX_UPLOAD_SIZE:
-                    self.send_json({"success": False, "status": "error", "error": f"File size exceeds maximum allowed limit ({MAX_UPLOAD_SIZE // (1024**3)} GB)."}, status=413)
+
+                # 1. Enforce 50 GB Maximum Limit on individual chunks and cumulative payload
+                effective_total = total_size if total_size > 0 else (offset + content_len)
+                if content_len > MAX_UPLOAD_SIZE or effective_total > MAX_UPLOAD_SIZE:
+                    self.send_json({
+                        "success": False,
+                        "status": "error",
+                        "error": f"File size exceeds maximum allowed limit ({MAX_UPLOAD_SIZE // (1024**3)} GB)."
+                    }, status=413)
                     return
 
-                # Pre-flight check free disk space (content_len + MIN_FREE_DISK_BUFFER)
+                # 2. Pre-flight remaining disk space check (needed_space + 500 MB safety buffer)
                 target_dir = os.path.dirname(full)
                 os.makedirs(target_dir, exist_ok=True)
+                needed_space = max(0, total_size - offset) if total_size > 0 else content_len
                 try:
                     free_disk = shutil.disk_usage(target_dir).free
-                    if free_disk < content_len + MIN_FREE_DISK_BUFFER:
-                        self.send_json({"success": False, "status": "error", "error": "Insufficient host storage space (500 MB buffer required)."}, status=507)
+                    if free_disk < needed_space + MIN_FREE_DISK_BUFFER:
+                        self.send_json({
+                            "success": False,
+                            "status": "error",
+                            "error": "Insufficient host storage space (500 MB buffer required)."
+                        }, status=507)
                         return
                 except Exception:
                     pass
 
-                # Offset bounds validation
-                if offset > 0 and os.path.exists(full):
-                    current_size = os.path.getsize(full)
-                    if offset > current_size:
-                        self.send_json({"success": False, "status": "error", "error": "Invalid resume offset beyond existing file length."}, status=400)
-                        return
-                elif offset > 0 and not os.path.exists(full):
-                    self.send_json({"success": False, "status": "error", "error": "Cannot resume non-existent file."}, status=400)
+                # 3. Offset bounds validation (negative, non-existent, and gap/beyond EOF)
+                if offset < 0:
+                    self.send_json({
+                        "success": False,
+                        "status": "error",
+                        "error": "Invalid resume offset: negative offset not allowed."
+                    }, status=400)
                     return
 
+                if offset > 0:
+                    if not os.path.exists(full):
+                        self.send_json({
+                            "success": False,
+                            "status": "error",
+                            "error": "Cannot resume non-existent file."
+                        }, status=400)
+                        return
+                    current_size = os.path.getsize(full)
+                    if offset > current_size:
+                        self.send_json({
+                            "success": False,
+                            "status": "error",
+                            "error": "Invalid resume offset beyond existing file length."
+                        }, status=400)
+                        return
+
+                # 4. Atomic chunk assembly: offset 0 -> 'wb', offset > 0 -> 'r+b' with seek & truncate
                 bytes_written = 0
-                chunk_size = 64 * 1024  # 64 KB streaming chunk
+                chunk_size = 256 * 1024  # 256 KB streaming read buffer
 
                 if offset == 0:
                     with open(full, "wb") as f:
@@ -6864,7 +7023,6 @@ class HostDropHandler(BaseHTTPRequestHandler):
                             f.write(chunk)
                             bytes_written += len(chunk)
                 else:
-                    # Resuming partial upload with atomic seek and truncate
                     with open(full, "r+b") as f:
                         f.seek(offset)
                         f.truncate(offset)
@@ -6876,7 +7034,7 @@ class HostDropHandler(BaseHTTPRequestHandler):
                             f.write(chunk)
                             bytes_written += len(chunk)
 
-                # Verify full payload received without premature connection drop
+                # 5. Premature connection drop verification
                 if content_len > 0 and bytes_written < content_len:
                     self.send_json({
                         "success": False,
@@ -6887,13 +7045,17 @@ class HostDropHandler(BaseHTTPRequestHandler):
                     }, status=400)
                     return
 
+                # 6. Commit confirmation with accurate byte tracking
+                final_file_size = os.path.getsize(full) if os.path.exists(full) else bytes_written
                 self.send_json({
                     "success": True,
                     "status": "ok",
                     "saved": rel,
                     "bytes": bytes_written,
                     "received": bytes_written,
-                    "completed": True
+                    "offset": offset,
+                    "total_written": final_file_size,
+                    "completed": (final_file_size >= total_size) if total_size > 0 else True
                 })
             except Exception as e:
                 self.send_json({"success": False, "status": "error", "error": str(e)}, status=400)

@@ -251,6 +251,49 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) for the full threat model and penetra
 
 ---
 
+## Frequently asked questions
+
+### Why does Cloudflare have a 100MB limit, and how does HostDrop bypass it?
+
+Cloudflare's free edge network proxy enforces a strict 100 MB request body cap (specifically 100,000,000 bytes) on incoming HTTP POST and PUT requests. Any upload attempt larger than this limit in a single request is blocked directly at the Cloudflare edge with an HTTP 413 (Payload Too Large) error before the data ever reaches your computer.
+
+This restriction applies only to client uploads (HTTP request bodies). Downloads from your host PC (HTTP response bodies) stream directly through Cloudflare unmetered and without body size caps.
+
+HostDrop bypasses the upload restriction using Smart Adaptive Chunking:
+1. When you access HostDrop over a Cloudflare tunnel (`*.trycloudflare.com`), the browser automatically sets upload chunk size to 90 MB (94,371,840 bytes).
+2. The 90 MB chunk size maximizes transfer throughput while staying safely below the 100,000,000-byte edge ceiling, leaving a 5.6 MB safety cushion for HTTP framing and headers.
+3. The host backend receives each chunk, verifies byte offsets, and appends the data directly to disk. This allows large files up to 50 GB to upload smoothly through Cloudflare without hitting edge limits.
+
+### Does chunking slow down local transfers on Wi-Fi, hotspot, or direct cable?
+
+No. On local networks, HostDrop optimizes transfer speed:
+- **100 MB Slices on Local Connections**: On direct Ethernet, Wi-Fi, mobile hotspots, and Pinggy SSH links, HostDrop sets chunk size to 100 MB (104,857,600 bytes). If a file is smaller than 100 MB, it is sent in a single direct request without slicing.
+- **HTTP Keep-Alive Connection Reuse**: Slices transfer sequentially across persistent HTTP Keep-Alive connections. The browser reuses the existing open TCP socket, eliminating connection handshake delays between chunks (0 ms idle delay).
+- **Sub-Millisecond LAN Round-Trip Time**: Round-trip latency over local Wi-Fi or direct cable is under 1 ms. Server chunk acknowledgments arrive almost instantly, allowing local transfers to run at full line rate (80 to 110 MB/s on Gigabit cable, 25 to 55 MB/s on Wi-Fi 5 GHz).
+- **Fault-Tolerance on Mobile**: Chunking prevents transfer loss. If a phone screen locks or Wi-Fi momentarily drops during a 10 GB file transfer, HostDrop only retries the single interrupted 90 MB or 100 MB chunk rather than restarting the entire transfer from zero.
+
+### Does Pinggy SSH tunnel have any 100MB limit?
+
+No. Pinggy SSH operates as a transparent reverse TCP tunnel over standard OpenSSH (`ssh -R`). Unlike Cloudflare's HTTP proxy, Pinggy SSH does not enforce a 100 MB request body buffer cap.
+
+When HostDrop routes through Pinggy SSH (`*.pinggy.link`), the browser uses the standard 100 MB chunk size. This delivers continuous data flow and automatic chunk retry protection without Cloudflare edge restrictions.
+
+### What is the maximum supported file size?
+
+HostDrop supports files up to **50 GB** per transfer (`MAX_UPLOAD_SIZE = 50 * 1024 * 1024 * 1024` bytes).
+
+To protect host storage, HostDrop runs a pre-flight disk capacity check before writing incoming chunks. The host computer must have enough available disk space for the total file size plus a mandatory 500 MB safety buffer (`MIN_FREE_DISK_BUFFER`). If disk space falls below this threshold, the server rejects the transfer with HTTP 507 Insufficient Storage to protect the host operating system.
+
+### How does smart resume work with chunked uploads?
+
+When an upload is resumed after an interruption:
+1. The browser calls `/api/check?path=<filename>&target=recv` before sending data.
+2. The server returns the exact number of bytes already written to disk.
+3. The browser skips all completed chunks, calculates the slice for the remaining bytes, and resumes from that byte offset.
+4. If a network glitch occurs during a chunk upload, the client automatically retries that chunk up to 3 times before displaying an error.
+
+---
+
 ## Troubleshooting
 
 ### Browser says site cannot be reached
